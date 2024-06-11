@@ -1,0 +1,14 @@
+[package]
+name = "arxia-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types, constants, and error handling for the Arxia protocol"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }

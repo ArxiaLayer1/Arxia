@@ -1,0 +1,99 @@
+//! Unified error type for the Arxia protocol.
+
+use thiserror::Error;
+
+/// Unified error type across all Arxia crates.
+#[derive(Debug, Error)]
+pub enum ArxiaError {
+    /// Invalid block type tag byte.
+    #[error("invalid block type tag: 0x{0:02x}")]
+    InvalidBlockType(u8),
+
+    /// Data too short for deserialization.
+    #[error("data too short: {got} bytes (need {expected})")]
+    DataTooShort {
+        /// Bytes received.
+        got: usize,
+        /// Bytes expected.
+        expected: usize,
+    },
+
+    /// Hash does not match recomputed value.
+    #[error("hash mismatch")]
+    HashMismatch,
+
+    /// Ed25519 signature verification failed.
+    #[error("signature verification failed: {0}")]
+    SignatureInvalid(String),
+
+    /// Insufficient balance for the operation.
+    #[error("insufficient balance: {available} < {required}")]
+    InsufficientBalance {
+        /// Available balance.
+        available: u64,
+        /// Required balance.
+        required: u64,
+    },
+
+    /// Cannot send zero amount.
+    #[error("cannot send zero amount")]
+    ZeroAmount,
+
+    /// Nonce gap detected in account chain.
+    #[error("nonce gap at block {index}: expected {expected}, got {got}")]
+    NonceGap {
+        /// Block index in the chain.
+        index: usize,
+        /// Expected nonce value.
+        expected: u64,
+        /// Actual nonce value.
+        got: u64,
+    },
+
+    /// Hash chain is broken between consecutive blocks.
+    #[error("hash chain broken at block {0}")]
+    HashChainBroken(usize),
+
+    /// Genesis block validation error.
+    #[error("invalid genesis block: {0}")]
+    InvalidGenesis(String),
+
+    /// SEND block destination mismatch.
+    #[error("SEND block not addressed to this account")]
+    WrongDestination,
+
+    /// Expected a SEND block but got a different type.
+    #[error("can only RECEIVE from a SEND block")]
+    NotSendBlock,
+
+    /// Double-spend detected (same nonce, different block hash).
+    #[error("double-spend detected for account at nonce {nonce}")]
+    DoubleSpend {
+        /// The conflicting nonce.
+        nonce: u64,
+    },
+
+    /// Transport-level error.
+    #[error("transport error: {0}")]
+    Transport(String),
+
+    /// Sync timed out.
+    #[error("sync timeout")]
+    SyncTimeout,
+
+    /// No neighbors available for gossip.
+    #[error("no neighbors available")]
+    NoNeighbors,
+
+    /// Hex decoding error.
+    #[error("hex decode error: {0}")]
+    HexDecode(#[from] hex::FromHexError),
+
+    /// Serialization error.
+    #[error("serialization error: {0}")]
+    Serialization(String),
+
+    /// Invalid cryptographic key.
+    #[error("invalid key: {0}")]
+    InvalidKey(String),
+}
