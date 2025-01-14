@@ -4,6 +4,7 @@ members = [
     "crates/arxia-core",
     "crates/arxia-crypto",
     "crates/arxia-lattice",
+    "crates/arxia-crdt",
 ]
 
 [workspace.package]
@@ -27,3 +28,4 @@ rand = "0.8"
 thiserror = "1"
 arxia-core = { path = "crates/arxia-core" }
 arxia-crypto = { path = "crates/arxia-crypto" }
+arxia-lattice = { path = "crates/arxia-lattice" }

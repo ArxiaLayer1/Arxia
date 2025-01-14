@@ -1,0 +1,16 @@
+[package]
+name = "arxia-crdt"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CRDTs and Vector Clocks for the Arxia protocol"
+
+[dependencies]
+arxia-core = { workspace = true }
+arxia-lattice = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
