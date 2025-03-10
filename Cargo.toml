@@ -5,6 +5,7 @@ members = [
     "crates/arxia-crypto",
     "crates/arxia-lattice",
     "crates/arxia-crdt",
+    "crates/arxia-consensus",
 ]
 
 [workspace.package]
@@ -29,3 +30,4 @@ thiserror = "1"
 arxia-core = { path = "crates/arxia-core" }
 arxia-crypto = { path = "crates/arxia-crypto" }
 arxia-lattice = { path = "crates/arxia-lattice" }
+arxia-crdt = { path = "crates/arxia-crdt" }

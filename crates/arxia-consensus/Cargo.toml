@@ -1,0 +1,18 @@
+[package]
+name = "arxia-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ORV consensus and conflict resolution for Arxia"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../arxia-core" }
+arxia-crypto = { path = "../arxia-crypto" }
+arxia-lattice = { path = "../arxia-lattice" }
+ed25519-dalek = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
