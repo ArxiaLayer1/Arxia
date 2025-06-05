@@ -7,6 +7,7 @@ members = [
     "crates/arxia-crdt",
     "crates/arxia-consensus",
     "crates/arxia-transport",
+    "crates/arxia-gossip",
 ]
 
 [workspace.package]
@@ -35,3 +36,4 @@ arxia-lattice = { path = "crates/arxia-lattice" }
 arxia-crdt = { path = "crates/arxia-crdt" }
 arxia-consensus = { path = "crates/arxia-consensus" }
 arxia-transport = { path = "crates/arxia-transport" }
+arxia-gossip = { path = "crates/arxia-gossip" }

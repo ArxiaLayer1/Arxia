@@ -1,0 +1,19 @@
+[package]
+name = "arxia-gossip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gossip protocol for block propagation and nonce sync in Arxia"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../arxia-core" }
+arxia-crypto = { path = "../arxia-crypto" }
+arxia-lattice = { path = "../arxia-lattice" }
+arxia-crdt = { path = "../arxia-crdt" }
+serde = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+arxia-transport = { path = "../arxia-transport" }
