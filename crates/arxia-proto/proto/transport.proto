@@ -1,0 +1,57 @@
+syntax = "proto3";
+package arxia.transport;
+
+/// Transport-layer frame wrapping for multi-modal mesh communication.
+
+/// A transport frame that wraps gossip messages for transmission over
+/// constrained links (LoRa, BLE, SMS, Satellite).
+message TransportFrame {
+  /// Frame format version (currently 1).
+  uint32 version = 1;
+  /// Transport mode used for this frame.
+  TransportMode mode = 2;
+  /// Sender node identifier (32-byte public key).
+  bytes sender = 3;
+  /// Recipient node identifier (empty for broadcast).
+  bytes recipient = 4;
+  /// Serialized GossipEnvelope payload.
+  bytes payload = 5;
+  /// Hop count / TTL (decremented at each relay).
+  uint32 hops = 6;
+  /// Transmission timestamp (unix millis).
+  uint64 timestamp = 7;
+  /// Ed25519 signature over fields 1-7.
+  bytes signature = 8;
+}
+
+/// Supported transport modes.
+enum TransportMode {
+  TRANSPORT_MODE_UNSPECIFIED = 0;
+  TRANSPORT_MODE_LORA = 1;
+  TRANSPORT_MODE_BLE = 2;
+  TRANSPORT_MODE_SMS = 3;
+  TRANSPORT_MODE_SATELLITE = 4;
+  TRANSPORT_MODE_TCP = 5;
+}
+
+/// Relay receipt proving a node relayed a frame.
+message RelayReceiptProto {
+  /// The hash of the relayed frame.
+  bytes frame_hash = 1;
+  /// The relayer node public key.
+  bytes relayer = 2;
+  /// Timestamp of relay.
+  uint64 timestamp = 3;
+  /// Signature by the relayer over (frame_hash || timestamp).
+  bytes signature = 4;
+}
+
+/// Acknowledgement sent back to confirm frame delivery.
+message TransportAck {
+  /// Hash of the acknowledged frame.
+  bytes frame_hash = 1;
+  /// Receiver public key.
+  bytes receiver = 2;
+  /// Round-trip latency estimate in milliseconds.
+  uint64 latency_ms = 3;
+}

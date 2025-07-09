@@ -1,0 +1,31 @@
+syntax = "proto3";
+package arxia;
+
+message CompactBlock {
+  uint32 block_type = 1;
+  bytes account = 2;
+  bytes previous = 3;
+  uint64 balance = 4;
+  uint64 nonce = 5;
+  uint64 timestamp = 6;
+  bytes hash = 7;
+  bytes signature = 8;
+  bytes destination = 9;
+  uint64 amount = 10;
+  bytes source_hash = 11;
+}
+
+message GossipEnvelope {
+  oneof payload {
+    CompactBlock block_announce = 1;
+    NonceSyncRequest nonce_sync_request = 2;
+    NonceSyncResponse nonce_sync_response = 3;
+    Ping ping = 4;
+  }
+}
+
+message NonceSyncRequest { string from = 1; }
+message NonceSyncResponse { repeated NonceEntry entries = 1; }
+message NonceEntry { bytes block_hash = 1; uint64 nonce = 2; bytes account_hash = 3; }
+message Ping { string node_id = 1; uint64 timestamp = 2; }
+message Vote { bytes block_hash = 1; bytes voter_pubkey = 2; uint64 delegated_stake = 3; uint64 nonce = 4; bytes signature = 5; }
