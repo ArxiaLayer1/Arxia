@@ -1,0 +1,11 @@
+[package]
+name = "arxia-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Storage backends for Arxia (memory, sled, SQLite)"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../arxia-core" }
