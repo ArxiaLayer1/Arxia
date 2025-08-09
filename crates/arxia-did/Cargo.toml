@@ -1,0 +1,14 @@
+[package]
+name = "arxia-did"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Decentralized Identity (DID) for Arxia"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../arxia-core" }
+arxia-crypto = { path = "../arxia-crypto" }
+bs58 = { workspace = true }
+serde = { workspace = true }
