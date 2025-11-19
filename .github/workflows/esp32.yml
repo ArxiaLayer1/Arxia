@@ -1,0 +1,50 @@
+name: ESP32
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "targets/esp32/**"
+      - "crates/arxia-core/**"
+      - "crates/arxia-crypto/**"
+      - "crates/arxia-lattice/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "targets/esp32/**"
+      - "crates/arxia-core/**"
+      - "crates/arxia-crypto/**"
+      - "crates/arxia-lattice/**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  esp32-check:
+    name: ESP32 Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+          targets: riscv32imc-unknown-none-elf
+      - uses: Swatinem/rust-cache@v2
+      - name: Check ESP32 crate
+        run: cargo check -p arxia-esp32 --target riscv32imc-unknown-none-elf
+
+  esp32-qemu-test:
+    name: ESP32 QEMU Tests (pre-gossip)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Run pre-gossip tests (x86_64 simulation)
+        run: |
+          # The 24 pre-gossip PoC tests run on x86_64 as ESP32/QEMU proxy.
+          # Full ESP32 QEMU integration requires espflash + qemu-system-xtensa.
+          # TODO(M6-M12): Add espflash + QEMU runner for on-target testing.
+          cargo test -p arxia-core -p arxia-crypto -p arxia-lattice
