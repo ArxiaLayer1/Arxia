@@ -1,0 +1,11 @@
+[package]
+name = "escrow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Escrow contract example for Arxia"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../../crates/arxia-core" }
