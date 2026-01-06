@@ -1,0 +1,15 @@
+[package]
+name = "offline_payment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Example: offline payment between two accounts"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../../crates/arxia-core" }
+arxia-crypto = { path = "../../crates/arxia-crypto" }
+arxia-lattice = { path = "../../crates/arxia-lattice" }
+arxia-finality = { path = "../../crates/arxia-finality" }
+arxia-gossip = { path = "../../crates/arxia-gossip" }
