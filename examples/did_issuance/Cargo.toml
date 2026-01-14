@@ -1,0 +1,13 @@
+[package]
+name = "did_issuance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Example: DID issuance"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../../crates/arxia-core" }
+arxia-crypto = { path = "../../crates/arxia-crypto" }
+arxia-did = { path = "../../crates/arxia-did" }
