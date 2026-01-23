@@ -1,0 +1,16 @@
+[package]
+name = "arxia-inspector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Arxia block and chain inspector tool"
+authors = []
+
+[[bin]]
+name = "arxia-inspector"
+path = "src/main.rs"
+
+[dependencies]
+arxia-core = { path = "../../crates/arxia-core" }
+arxia-lattice = { path = "../../crates/arxia-lattice" }
