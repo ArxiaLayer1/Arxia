@@ -1,0 +1,12 @@
+[package]
+name = "arxia-finality"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Finality assessment for Arxia transactions"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../arxia-core" }
+arxia-gossip = { path = "../arxia-gossip" }
