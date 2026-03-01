@@ -4,10 +4,26 @@ members = [
     "crates/arxia-core",
     "crates/arxia-crypto",
     "crates/arxia-lattice",
-    "crates/arxia-crdt",
     "crates/arxia-consensus",
+    "crates/arxia-crdt",
     "crates/arxia-transport",
     "crates/arxia-gossip",
+    "crates/arxia-did",
+    "crates/arxia-wasm",
+    "crates/arxia-storage",
+    "crates/arxia-relay",
+    "crates/arxia-finality",
+    "crates/arxia-proto",
+    "crates/arxia-bench",
+    "bin/arxia-node",
+    "tools/arxia-cli",
+    "tools/arxia-inspector",
+    "examples/offline_payment",
+    "examples/mesh_relay",
+    "examples/did_issuance",
+    "examples/partition_reconciliation",
+    "contracts/escrow",
+    "contracts/token-lock",
 ]
 
 [workspace.package]
@@ -27,9 +43,17 @@ chacha20poly1305 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"
+prost = "0.13"
 hex = "0.4"
+lz4_flex = "0.11"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
 thiserror = "1"
+bs58 = "0.5"
+
 arxia-core = { path = "crates/arxia-core" }
 arxia-crypto = { path = "crates/arxia-crypto" }
 arxia-lattice = { path = "crates/arxia-lattice" }
@@ -37,3 +61,22 @@ arxia-crdt = { path = "crates/arxia-crdt" }
 arxia-consensus = { path = "crates/arxia-consensus" }
 arxia-transport = { path = "crates/arxia-transport" }
 arxia-gossip = { path = "crates/arxia-gossip" }
+arxia-finality = { path = "crates/arxia-finality" }
+arxia-relay = { path = "crates/arxia-relay" }
+arxia-did = { path = "crates/arxia-did" }
+arxia-storage = { path = "crates/arxia-storage" }
+arxia-proto = { path = "crates/arxia-proto" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.bench]
+inherits = "release"
+debug = true
