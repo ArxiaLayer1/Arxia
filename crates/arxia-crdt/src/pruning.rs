@@ -123,10 +123,7 @@ pub fn prune_expired(
 ///
 /// [`PruningResult::Clean`] if no cap was exceeded,
 /// [`PruningResult::ForcedPruning`] with the eviction count otherwise.
-pub fn prune_to_cap(
-    clock: &mut BTreeMap<[u8; 32], VectorClockEntry>,
-    cap: usize,
-) -> PruningResult {
+pub fn prune_to_cap(clock: &mut BTreeMap<[u8; 32], VectorClockEntry>, cap: usize) -> PruningResult {
     if clock.len() <= cap {
         return PruningResult::Clean;
     }
@@ -144,8 +141,7 @@ pub fn prune_to_cap(
     // Sort by counter ascending, then by node_id for deterministic tie-breaking.
     entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
-    let evicted_ids: Vec<[u8; 32]> =
-        entries.iter().take(to_evict).map(|(id, _)| *id).collect();
+    let evicted_ids: Vec<[u8; 32]> = entries.iter().take(to_evict).map(|(id, _)| *id).collect();
 
     for id in &evicted_ids {
         clock.remove(id);
@@ -182,16 +178,12 @@ pub fn prune_all(
 // ─── Convenience wrappers using protocol defaults ──────────────────────────
 
 /// Prune expired entries using the default 7-day expiry and the current time.
-pub fn prune_expired_default(
-    clock: &mut BTreeMap<[u8; 32], VectorClockEntry>,
-) -> PruningResult {
+pub fn prune_expired_default(clock: &mut BTreeMap<[u8; 32], VectorClockEntry>) -> PruningResult {
     prune_expired(clock, EXPIRY_DAYS, now_unix())
 }
 
 /// Apply full pruning using protocol defaults (`EXPIRY_DAYS`, `MAX_VECTOR_CLOCK_ENTRIES`).
-pub fn prune_all_default(
-    clock: &mut BTreeMap<[u8; 32], VectorClockEntry>,
-) -> PruningResult {
+pub fn prune_all_default(clock: &mut BTreeMap<[u8; 32], VectorClockEntry>) -> PruningResult {
     prune_all(clock, EXPIRY_DAYS, MAX_VECTOR_CLOCK_ENTRIES, now_unix())
 }
 
@@ -235,7 +227,7 @@ mod tests {
     #[test]
     fn test_prune_expired_clean_when_all_fresh() {
         let mut clock = BTreeMap::new();
-        clock.insert(node_id(1), make_entry(10, REF_TIME - 1 * 86_400));
+        clock.insert(node_id(1), make_entry(10, REF_TIME - 86_400));
         clock.insert(node_id(2), make_entry(5, REF_TIME - 2 * 86_400));
 
         let result = prune_expired(&mut clock, EXPIRY_DAYS, REF_TIME);
@@ -260,7 +252,7 @@ mod tests {
     fn test_prune_to_cap_evicts_lowest_counters() {
         let mut clock = BTreeMap::new();
         clock.insert(node_id(1), make_entry(100, REF_TIME));
-        clock.insert(node_id(2), make_entry(5, REF_TIME));   // lowest — evicted
+        clock.insert(node_id(2), make_entry(5, REF_TIME)); // lowest — evicted
         clock.insert(node_id(3), make_entry(50, REF_TIME));
 
         let result = prune_to_cap(&mut clock, 2);
@@ -303,7 +295,7 @@ mod tests {
     fn test_prune_all_prefers_expired_over_forced() {
         let mut clock = BTreeMap::new();
         // Fresh node
-        clock.insert(node_id(1), make_entry(100, REF_TIME - 1 * 86_400));
+        clock.insert(node_id(1), make_entry(100, REF_TIME - 86_400));
         // Expired node
         clock.insert(node_id(2), make_entry(50, REF_TIME - 10 * 86_400));
 
@@ -324,7 +316,10 @@ mod tests {
 
         let result = prune_all(&mut clock, EXPIRY_DAYS, 3, REF_TIME);
 
-        assert!(matches!(result, PruningResult::ForcedPruning { evicted: 2 }));
+        assert!(matches!(
+            result,
+            PruningResult::ForcedPruning { evicted: 2 }
+        ));
         assert_eq!(clock.len(), 3);
     }
 
