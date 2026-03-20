@@ -30,11 +30,17 @@ pub enum PruningResult {
     /// No pruning was necessary.
     Clean,
     /// One or more expired entries were removed. Causal ordering is preserved.
-    ExpiredRemoved { count: usize },
+    ExpiredRemoved {
+        /// Number of expired entries that were removed.
+        count: usize,
+    },
     /// The entry cap was exceeded. Low-counter entries were evicted.
     /// Causal ordering may be ambiguous for evicted nodes — use hash
     /// tiebreaker in conflict resolution.
-    ForcedPruning { evicted: usize },
+    ForcedPruning {
+        /// Number of entries that were forcibly evicted.
+        evicted: usize,
+    },
 }
 
 /// A timestamped Vector Clock entry.
@@ -138,7 +144,8 @@ pub fn prune_to_cap(
     // Sort by counter ascending, then by node_id for deterministic tie-breaking.
     entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
-    let evicted_ids: Vec<[u8; 32]> = entries.iter().take(to_evict).map(|(id, _)| *id).collect();
+    let evicted_ids: Vec<[u8; 32]> =
+        entries.iter().take(to_evict).map(|(id, _)| *id).collect();
 
     for id in &evicted_ids {
         clock.remove(id);
@@ -195,7 +202,10 @@ mod tests {
     use super::*;
 
     fn make_entry(counter: u64, last_seen_unix: u64) -> VectorClockEntry {
-        VectorClockEntry { counter, last_seen_unix }
+        VectorClockEntry {
+            counter,
+            last_seen_unix,
+        }
     }
 
     fn node_id(byte: u8) -> [u8; 32] {
