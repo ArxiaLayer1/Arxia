@@ -110,4 +110,12 @@ pub enum ArxiaError {
         /// Maximum allowed initial balance in micro-ARX.
         max: u64,
     },
+
+    /// Attempt to RECEIVE from a SEND block whose hash has already been
+    /// consumed by this account.
+    #[error("duplicate receive: source hash {source_hash} already consumed")]
+    DuplicateReceive {
+        /// The hash of the SEND block that was already received.
+        source_hash: String,
+    },
 }
