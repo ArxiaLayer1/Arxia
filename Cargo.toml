@@ -24,6 +24,7 @@ members = [
     "examples/partition_reconciliation",
     "contracts/escrow",
     "contracts/token-lock",
+    "targets/esp32",
 ]
 
 [workspace.package]
