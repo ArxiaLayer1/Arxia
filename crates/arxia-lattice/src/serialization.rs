@@ -94,6 +94,11 @@ pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
         },
         t => return Err(ArxiaError::InvalidBlockType(t)),
     };
+    // CRITICAL: the hash is recomputed from the timestamp contained in the
+    // data bytes, NOT from a fresh SystemTime::now(). This guarantees the
+    // hash is a pure function of the serialized payload and is identical
+    // across nodes with out-of-sync clocks. Regression tests below pin
+    // this property.
     let hash = Block::compute_hash(&account, &previous, &block_type, balance, nonce, timestamp);
     Ok(Block {
         account,
@@ -149,5 +154,104 @@ mod tests {
     fn test_from_compact_too_short() {
         let data = vec![0u8; 100];
         assert!(from_compact_bytes(&data).is_err());
+    }
+
+    // ========================================================================
+    // Regression guards for Bug 6 — timestamp-in-hash concern
+    //
+    // stoneburner suggested that nodes with out-of-sync clocks would
+    // compute different hashes for the same block. This was NOT true of
+    // the code as written: compute_hash takes `timestamp` as a
+    // parameter, and from_compact_bytes reads it from the serialized
+    // payload. The hash is therefore a pure function of the bytes.
+    //
+    // The tests below pin that property so any future refactor that
+    // replaces `timestamp` with a fresh `SystemTime::now()` call fails
+    // loudly.
+    // ========================================================================
+
+    #[test]
+    fn test_hash_is_deterministic_across_round_trip() {
+        // Same bytes in, same hash out. Always.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let block = chain.open(1_000_000, &mut vc).unwrap();
+        let original_hash = block.hash.clone();
+        let original_ts = block.timestamp;
+        let bytes = to_compact_bytes(&block);
+        let restored = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(restored.hash, original_hash);
+        assert_eq!(restored.timestamp, original_ts);
+    }
+
+    #[test]
+    fn test_hash_stable_across_delayed_deserialization() {
+        // Simulates "same bytes received hours later on a different node":
+        // we deserialize multiple times, possibly with a real delay between
+        // calls. Every deserialization produces the identical hash.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let block = chain.open(1_000_000, &mut vc).unwrap();
+        let bytes = to_compact_bytes(&block);
+        let h1 = from_compact_bytes(&bytes).unwrap().hash;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let h2 = from_compact_bytes(&bytes).unwrap().hash;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let h3 = from_compact_bytes(&bytes).unwrap().hash;
+        assert_eq!(h1, h2);
+        assert_eq!(h2, h3);
+        assert_eq!(h1, block.hash);
+    }
+
+    #[test]
+    fn test_hash_changes_when_timestamp_bytes_are_mutated() {
+        // Adversarial: tamper with only the timestamp bytes in the
+        // serialized form. The recomputed hash must differ, which means
+        // verify_block (elsewhere) will reject the block on HashMismatch.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let block = chain.open(1_000_000, &mut vc).unwrap();
+        let mut bytes = to_compact_bytes(&block);
+        // Bytes 81..89 are the timestamp. Flip the low-order byte.
+        bytes[88] ^= 0xFF;
+        let tampered = from_compact_bytes(&bytes).unwrap();
+        assert_ne!(tampered.hash, block.hash);
+        // The stored signature in tampered is still the original one;
+        // verify_block would catch the mismatch on the very next check.
+    }
+
+    #[test]
+    fn test_two_nodes_compute_same_hash_for_same_bytes() {
+        // Explicit multi-"node" simulation: node A serializes, node B
+        // deserializes on the same bytes. Hashes match regardless of
+        // wall-clock drift between them.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let block_a = chain.open(1_000_000, &mut vc).unwrap();
+        let wire = to_compact_bytes(&block_a);
+        // "Node B" deserializes fresh
+        let block_b = from_compact_bytes(&wire).unwrap();
+        assert_eq!(block_a.hash, block_b.hash);
+        assert_eq!(block_a.account, block_b.account);
+        assert_eq!(block_a.timestamp, block_b.timestamp);
+    }
+
+    #[test]
+    fn test_explicit_timestamp_control_produces_stable_hash() {
+        // Pin the property even more explicitly: computing the hash
+        // directly via Block::compute_hash with a given timestamp yields
+        // exactly the hash stored in the corresponding Block struct.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let block = chain.open(1_000_000, &mut vc).unwrap();
+        let recomputed = Block::compute_hash(
+            &block.account,
+            &block.previous,
+            &block.block_type,
+            block.balance,
+            block.nonce,
+            block.timestamp,
+        );
+        assert_eq!(recomputed, block.hash);
     }
 }
