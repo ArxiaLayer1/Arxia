@@ -85,7 +85,7 @@ mod tests {
         let mut node = GossipNode::new("n1".into());
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        let block = alice.open(1_000_000, &mut vc);
+        let block = alice.open(1_000_000, &mut vc).unwrap();
         assert!(node.add_block(block).is_ok());
         assert_eq!(node.known_blocks.len(), 1);
         assert_eq!(node.nonce_registry.len(), 1);
@@ -96,7 +96,7 @@ mod tests {
         let mut node = GossipNode::new("n1".into());
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        let mut block = alice.open(1_000_000, &mut vc);
+        let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.signature = vec![0u8; 64];
         let result = node.add_block(block);
         assert!(matches!(result, Err(ArxiaError::SignatureInvalid(_))));
@@ -109,7 +109,7 @@ mod tests {
         let mut node = GossipNode::new("n1".into());
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        let mut block = alice.open(1_000_000, &mut vc);
+        let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.hash = "0".repeat(64);
         let result = node.add_block(block);
         assert!(matches!(result, Err(ArxiaError::HashMismatch)));

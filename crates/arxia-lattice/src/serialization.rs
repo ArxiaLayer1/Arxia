@@ -116,7 +116,7 @@ mod tests {
     fn test_compact_round_trip_open() {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
-        let block = chain.open(1_000_000, &mut vc);
+        let block = chain.open(1_000_000, &mut vc).unwrap();
         let bytes = to_compact_bytes(&block);
         assert_eq!(bytes.len(), COMPACT_BLOCK_SIZE);
         let restored = from_compact_bytes(&bytes).unwrap();
@@ -128,7 +128,7 @@ mod tests {
     fn test_compact_round_trip_send() {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
-        chain.open(1_000_000, &mut vc);
+        chain.open(1_000_000, &mut vc).unwrap();
         let send = chain.send(&"ab".repeat(32), 500_000, &mut vc).unwrap();
         let bytes = to_compact_bytes(&send);
         assert_eq!(bytes.len(), COMPACT_BLOCK_SIZE);
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(COMPACT_BLOCK_SIZE, 193);
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
-        let block = chain.open(42, &mut vc);
+        let block = chain.open(42, &mut vc).unwrap();
         assert_eq!(to_compact_bytes(&block).len(), 193);
     }
 

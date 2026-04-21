@@ -17,8 +17,8 @@ fn main() {
     println!("Bob:   {}", bob.short_id());
     println!();
 
-    let alice_genesis = alice.open(100_000_000, &mut vclock);
-    let _bob_genesis = bob.open(0, &mut vclock);
+    let alice_genesis = alice.open(100_000_000, &mut vclock).unwrap();
+    let _bob_genesis = bob.open(0, &mut vclock).unwrap();
 
     println!(
         "Alice opened with 100 ARX (genesis: {}...)",

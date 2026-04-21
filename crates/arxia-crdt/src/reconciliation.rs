@@ -65,7 +65,7 @@ mod tests {
     fn test_reconcile_identical_partitions() {
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        alice.open(1_000_000, &mut vc);
+        alice.open(1_000_000, &mut vc).unwrap();
         let result = reconcile_partitions(&alice.chain, &alice.chain);
         assert_eq!(result[alice.id()], 1_000_000);
     }
@@ -81,8 +81,8 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
         let mut bob = AccountChain::new();
-        alice.open(1_000_000, &mut vc);
-        bob.open(500_000, &mut vc);
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(500_000, &mut vc).unwrap();
         let result = reconcile_partitions(&alice.chain, &bob.chain);
         assert_eq!(result[alice.id()], 1_000_000);
         assert_eq!(result[bob.id()], 500_000);

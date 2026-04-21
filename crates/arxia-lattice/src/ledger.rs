@@ -61,7 +61,7 @@ mod tests {
         let mut ledger = Ledger::new();
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        let block = alice.open(1_000_000, &mut vc);
+        let block = alice.open(1_000_000, &mut vc).unwrap();
         assert!(ledger.add_block(block).is_ok());
         assert!(ledger.get_chain(alice.id()).is_some());
     }
@@ -71,7 +71,7 @@ mod tests {
         let mut ledger = Ledger::new();
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        let mut block = alice.open(1_000_000, &mut vc);
+        let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.hash = "0".repeat(64);
         let result = ledger.add_block(block);
         assert!(matches!(result, Err(ArxiaError::HashMismatch)));
@@ -83,7 +83,7 @@ mod tests {
         let mut ledger = Ledger::new();
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        let mut block = alice.open(1_000_000, &mut vc);
+        let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.signature[0] ^= 0xFF;
         let result = ledger.add_block(block);
         assert!(
@@ -101,7 +101,7 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
         let bob = AccountChain::new();
-        let mut block = alice.open(1_000_000, &mut vc);
+        let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.account = bob.id().to_string();
         // The hash now no longer matches the account field baked into the
         // Blake3 input, so verify_block catches it on HashMismatch first.
@@ -124,7 +124,7 @@ mod tests {
         let mut ledger = Ledger::new();
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        let mut block = alice.open(1_000_000, &mut vc);
+        let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.signature = vec![0u8; 64];
         let result = ledger.add_block(block);
         assert!(matches!(result, Err(ArxiaError::SignatureInvalid(_))));
