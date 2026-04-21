@@ -83,7 +83,7 @@ mod tests {
     fn test_verify_block_valid() {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
-        let block = chain.open(1_000_000, &mut vc);
+        let block = chain.open(1_000_000, &mut vc).unwrap();
         assert!(verify_block(&block).is_ok());
     }
 
@@ -92,8 +92,8 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
         let mut bob = AccountChain::new();
-        alice.open(1_000_000, &mut vc);
-        bob.open(0, &mut vc);
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
         let send = alice.send(bob.id(), 100_000, &mut vc).unwrap();
         bob.receive(&send, &mut vc).unwrap();
         assert!(verify_chain_integrity(&alice.chain).is_ok());
@@ -109,7 +109,7 @@ mod tests {
     fn test_verify_block_rejects_tampered_hash() {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
-        let mut block = chain.open(1_000_000, &mut vc);
+        let mut block = chain.open(1_000_000, &mut vc).unwrap();
         block.hash = "0".repeat(64);
         assert!(verify_block(&block).is_err());
     }

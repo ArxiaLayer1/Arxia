@@ -75,7 +75,7 @@ mod tests {
     fn test_resolve_conflict_stake_weighted() {
         let mut alice = AccountChain::new();
         let mut vclock = VectorClock::new();
-        alice.open(100_000_000, &mut vclock);
+        alice.open(100_000_000, &mut vclock).unwrap();
         let bob = AccountChain::new();
         let carol = AccountChain::new();
         let ba = alice.send(bob.id(), 10_000, &mut vclock).unwrap();
@@ -101,7 +101,7 @@ mod tests {
     fn test_detect_double_spend() {
         let mut alice = AccountChain::new();
         let mut vclock = VectorClock::new();
-        alice.open(100_000_000, &mut vclock);
+        alice.open(100_000_000, &mut vclock).unwrap();
         let bob = AccountChain::new();
         let carol = AccountChain::new();
         let ba = alice.send(bob.id(), 10_000, &mut vclock).unwrap();
@@ -118,7 +118,7 @@ mod tests {
     fn test_detect_no_double_spend() {
         let mut alice = AccountChain::new();
         let mut vclock = VectorClock::new();
-        alice.open(100_000_000, &mut vclock);
+        alice.open(100_000_000, &mut vclock).unwrap();
         let bob = AccountChain::new();
         let b1 = alice.send(bob.id(), 10_000, &mut vclock).unwrap();
         let b2 = alice.send(bob.id(), 20_000, &mut vclock).unwrap();

@@ -96,4 +96,8 @@ pub enum ArxiaError {
     /// Invalid cryptographic key.
     #[error("invalid key: {0}")]
     InvalidKey(String),
+
+    /// Attempt to Open an account that already has blocks in its chain.
+    #[error("account already open: chain is not empty")]
+    AccountAlreadyOpen,
 }

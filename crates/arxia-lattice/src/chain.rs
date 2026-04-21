@@ -115,7 +115,20 @@ impl AccountChain {
     }
 
     /// Open an account with an initial balance (genesis block).
-    pub fn open(&mut self, initial_balance: u64, vclock: &mut VectorClock) -> Block {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArxiaError::AccountAlreadyOpen`] if the chain already
+    /// contains any block. `open` is idempotent-by-rejection: a second
+    /// call leaves the existing state untouched.
+    pub fn open(
+        &mut self,
+        initial_balance: u64,
+        vclock: &mut VectorClock,
+    ) -> Result<Block, ArxiaError> {
+        if !self.chain.is_empty() {
+            return Err(ArxiaError::AccountAlreadyOpen);
+        }
         let sid = self.public_key_hex[..8].to_string();
         vclock.tick(&sid);
         self.balance = initial_balance;
@@ -144,7 +157,7 @@ impl AccountChain {
             signature: signature.to_bytes().to_vec(),
         };
         self.chain.push(block.clone());
-        block
+        Ok(block)
     }
 
     /// Send funds to a destination account.
@@ -271,7 +284,7 @@ mod tests {
     fn test_open_account() {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
-        let block = chain.open(1_000_000, &mut vc);
+        let block = chain.open(1_000_000, &mut vc).unwrap();
         assert_eq!(block.balance, 1_000_000);
         assert_eq!(block.nonce, 1);
         assert!(block.previous.is_empty());
@@ -284,8 +297,8 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
         let mut bob = AccountChain::new();
-        alice.open(1_000_000, &mut vc);
-        bob.open(500_000, &mut vc);
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(500_000, &mut vc).unwrap();
         let send = alice.send(bob.id(), 200_000, &mut vc).unwrap();
         assert_eq!(alice.balance, 800_000);
         let recv = bob.receive(&send, &mut vc).unwrap();
@@ -297,7 +310,7 @@ mod tests {
     fn test_send_insufficient_balance() {
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        alice.open(100, &mut vc);
+        alice.open(100, &mut vc).unwrap();
         let result = alice.send("deadbeef", 200, &mut vc);
         assert!(result.is_err());
     }
@@ -306,7 +319,7 @@ mod tests {
     fn test_send_zero_amount() {
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
-        alice.open(1_000, &mut vc);
+        alice.open(1_000, &mut vc).unwrap();
         assert!(alice.send("dest", 0, &mut vc).is_err());
     }
 
@@ -350,5 +363,80 @@ mod tests {
         let mut vc2 = VectorClock::new();
         vc2.tick("b");
         assert!(vc1.is_concurrent(&vc2));
+    }
+
+    // ========================================================================
+    // Adversarial tests for Bug 2 (open idempotence)
+    // ========================================================================
+
+    #[test]
+    fn test_open_cannot_be_called_twice() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        chain.open(1_000_000, &mut vc).unwrap();
+        let result = chain.open(9_999_999, &mut vc);
+        assert!(result.is_err());
+        assert_eq!(chain.balance, 1_000_000);
+        assert_eq!(chain.nonce, 1);
+        assert_eq!(chain.chain.len(), 1);
+    }
+
+    #[test]
+    fn test_open_returns_account_already_open() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        chain.open(1_000_000, &mut vc).unwrap();
+        let err = chain.open(1, &mut vc).unwrap_err();
+        assert!(
+            matches!(err, ArxiaError::AccountAlreadyOpen),
+            "expected AccountAlreadyOpen, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_open_after_send_rejected() {
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let bob = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        alice.send(bob.id(), 100, &mut vc).unwrap();
+        // chain now has 2 blocks; open must still be rejected
+        let result = alice.open(5_000_000, &mut vc);
+        assert!(matches!(result, Err(ArxiaError::AccountAlreadyOpen)));
+        assert_eq!(alice.chain.len(), 2);
+    }
+
+    #[test]
+    fn test_open_after_receive_rejected() {
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        let send = alice.send(bob.id(), 200_000, &mut vc).unwrap();
+        bob.receive(&send, &mut vc).unwrap();
+        // bob has 2 blocks now
+        let result = bob.open(u64::MAX, &mut vc);
+        assert!(matches!(result, Err(ArxiaError::AccountAlreadyOpen)));
+        assert_eq!(bob.chain.len(), 2);
+    }
+
+    #[test]
+    fn test_open_does_not_modify_state_on_second_attempt() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        chain.open(1_000_000, &mut vc).unwrap();
+        let snapshot_balance = chain.balance;
+        let snapshot_nonce = chain.nonce;
+        let snapshot_hash = chain.chain[0].hash.clone();
+        // Adversary tries every pathological balance.
+        for malicious in [0u64, 1, u64::MAX, u64::MAX - 1, 1_000_000_001] {
+            let _ = chain.open(malicious, &mut vc);
+        }
+        assert_eq!(chain.balance, snapshot_balance);
+        assert_eq!(chain.nonce, snapshot_nonce);
+        assert_eq!(chain.chain.len(), 1);
+        assert_eq!(chain.chain[0].hash, snapshot_hash);
     }
 }
