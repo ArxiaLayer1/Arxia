@@ -100,4 +100,14 @@ pub enum ArxiaError {
     /// Attempt to Open an account that already has blocks in its chain.
     #[error("account already open: chain is not empty")]
     AccountAlreadyOpen,
+
+    /// Attempt to Open an account with an initial balance that exceeds
+    /// the per-account ceiling or the remaining protocol supply.
+    #[error("supply cap exceeded: requested {requested} > max {max}")]
+    SupplyCapExceeded {
+        /// Requested initial balance in micro-ARX.
+        requested: u64,
+        /// Maximum allowed initial balance in micro-ARX.
+        max: u64,
+    },
 }

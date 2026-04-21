@@ -118,9 +118,11 @@ impl AccountChain {
     ///
     /// # Errors
     ///
-    /// Returns [`ArxiaError::AccountAlreadyOpen`] if the chain already
-    /// contains any block. `open` is idempotent-by-rejection: a second
-    /// call leaves the existing state untouched.
+    /// - [`ArxiaError::AccountAlreadyOpen`] if the chain already contains
+    ///   any block. `open` is idempotent-by-rejection.
+    /// - [`ArxiaError::SupplyCapExceeded`] if `initial_balance` is greater
+    ///   than [`arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT`]. The per-account
+    ///   cap defends against unbounded self-mint at account creation.
     pub fn open(
         &mut self,
         initial_balance: u64,
@@ -128,6 +130,12 @@ impl AccountChain {
     ) -> Result<Block, ArxiaError> {
         if !self.chain.is_empty() {
             return Err(ArxiaError::AccountAlreadyOpen);
+        }
+        if initial_balance > arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT {
+            return Err(ArxiaError::SupplyCapExceeded {
+                requested: initial_balance,
+                max: arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT,
+            });
         }
         let sid = self.public_key_hex[..8].to_string();
         vclock.tick(&sid);
@@ -430,7 +438,8 @@ mod tests {
         let snapshot_balance = chain.balance;
         let snapshot_nonce = chain.nonce;
         let snapshot_hash = chain.chain[0].hash.clone();
-        // Adversary tries every pathological balance.
+        // Adversary tries every pathological balance. All rejected
+        // either by the idempotence check (first) or the supply cap.
         for malicious in [0u64, 1, u64::MAX, u64::MAX - 1, 1_000_000_001] {
             let _ = chain.open(malicious, &mut vc);
         }
@@ -438,5 +447,73 @@ mod tests {
         assert_eq!(chain.nonce, snapshot_nonce);
         assert_eq!(chain.chain.len(), 1);
         assert_eq!(chain.chain[0].hash, snapshot_hash);
+    }
+
+    // ========================================================================
+    // Adversarial tests for Bug 3 (supply cap)
+    // ========================================================================
+
+    #[test]
+    fn test_open_rejects_u64_max() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let result = chain.open(u64::MAX, &mut vc);
+        assert!(matches!(result, Err(ArxiaError::SupplyCapExceeded { .. })));
+        assert!(chain.chain.is_empty());
+        assert_eq!(chain.balance, 0);
+        assert_eq!(chain.nonce, 0);
+    }
+
+    #[test]
+    fn test_open_rejects_above_per_account_cap() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let over = arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT + 1;
+        let err = chain.open(over, &mut vc).unwrap_err();
+        match err {
+            ArxiaError::SupplyCapExceeded { requested, max } => {
+                assert_eq!(requested, over);
+                assert_eq!(max, arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT);
+            }
+            other => panic!("expected SupplyCapExceeded, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_open_accepts_exactly_at_cap() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let at_cap = arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT;
+        let block = chain.open(at_cap, &mut vc).unwrap();
+        assert_eq!(block.balance, at_cap);
+        assert_eq!(chain.balance, at_cap);
+    }
+
+    #[test]
+    fn test_open_accepts_well_below_cap() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let modest = 1_000_000u64; // 1 ARX
+        assert!(chain.open(modest, &mut vc).is_ok());
+    }
+
+    #[test]
+    fn test_open_rejects_total_supply() {
+        // Attacker tries to mint the entire protocol supply into a single
+        // account. Must be rejected by the per-account cap even though it
+        // is technically <= TOTAL_SUPPLY.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let result = chain.open(arxia_core::TOTAL_SUPPLY_MICRO_ARX, &mut vc);
+        assert!(matches!(result, Err(ArxiaError::SupplyCapExceeded { .. })));
+    }
+
+    #[test]
+    fn test_open_cap_is_not_total_supply() {
+        // Sanity: the per-account cap is strictly less than total supply.
+        // Otherwise a single open call could drain the entire supply.
+        const _: () = assert!(
+            arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT < arxia_core::TOTAL_SUPPLY_MICRO_ARX
+        );
     }
 }
