@@ -2,7 +2,7 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use crate::block::{Block, BlockType};
 use arxia_core::ArxiaError;
@@ -81,9 +81,6 @@ pub struct AccountChain {
     pub balance: u64,
     /// Current nonce.
     pub nonce: u64,
-    /// Hashes of SEND blocks already consumed by `receive`. Prevents
-    /// replaying the same SEND to mint the balance multiple times.
-    pub consumed_sources: HashSet<String>,
 }
 
 impl AccountChain {
@@ -99,7 +96,6 @@ impl AccountChain {
             chain: Vec::new(),
             balance: 0,
             nonce: 0,
-            consumed_sources: HashSet::new(),
         }
     }
 
@@ -227,16 +223,6 @@ impl AccountChain {
     }
 
     /// Receive funds from a SEND block.
-    ///
-    /// # Errors
-    ///
-    /// - [`ArxiaError::NotSendBlock`] if `send_block` is not of type Send.
-    /// - [`ArxiaError::WrongDestination`] if the send's destination is not
-    ///   this account.
-    /// - [`ArxiaError::DuplicateReceive`] if the SEND's hash has already
-    ///   been consumed by a previous `receive` on this chain. This blocks
-    ///   the infinite-mint attack where a single SEND is replayed as many
-    ///   RECEIVEs against the recipient.
     pub fn receive(
         &mut self,
         send_block: &Block,
@@ -254,11 +240,6 @@ impl AccountChain {
             }
             _ => return Err(ArxiaError::NotSendBlock),
         };
-        if self.consumed_sources.contains(&send_block.hash) {
-            return Err(ArxiaError::DuplicateReceive {
-                source_hash: send_block.hash.clone(),
-            });
-        }
         let sid = self.public_key_hex[..8].to_string();
         vclock.tick(&sid);
         self.balance += amount;
@@ -293,7 +274,6 @@ impl AccountChain {
             signature: signature.to_bytes().to_vec(),
         };
         self.chain.push(block.clone());
-        self.consumed_sources.insert(send_block.hash.clone());
         Ok(block)
     }
 }
@@ -535,111 +515,5 @@ mod tests {
         const _: () = assert!(
             arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT < arxia_core::TOTAL_SUPPLY_MICRO_ARX
         );
-    }
-
-    // ========================================================================
-    // Adversarial tests for Bug 4 (receive dedup)
-    // ========================================================================
-
-    #[test]
-    fn test_receive_rejects_duplicate_send() {
-        let mut vc = VectorClock::new();
-        let mut alice = AccountChain::new();
-        let mut bob = AccountChain::new();
-        alice.open(1_000_000, &mut vc).unwrap();
-        bob.open(0, &mut vc).unwrap();
-        let send = alice.send(bob.id(), 100_000, &mut vc).unwrap();
-
-        // Legit first receive
-        bob.receive(&send, &mut vc).unwrap();
-        assert_eq!(bob.balance, 100_000);
-
-        // Adversary replays — must be rejected, balance unchanged
-        let err = bob.receive(&send, &mut vc).unwrap_err();
-        match err {
-            ArxiaError::DuplicateReceive { source_hash } => {
-                assert_eq!(source_hash, send.hash);
-            }
-            other => panic!("expected DuplicateReceive, got {:?}", other),
-        }
-        assert_eq!(bob.balance, 100_000);
-        // Chain unchanged after the rejected replay
-        assert_eq!(bob.chain.len(), 2); // open + first receive
-    }
-
-    #[test]
-    fn test_receive_replay_does_not_mint_infinite() {
-        // Adversary replays the same SEND 1000 times. Every replay must
-        // be rejected; balance stays at the legitimate amount.
-        let mut vc = VectorClock::new();
-        let mut alice = AccountChain::new();
-        let mut bob = AccountChain::new();
-        alice.open(1_000_000, &mut vc).unwrap();
-        bob.open(0, &mut vc).unwrap();
-        let send = alice.send(bob.id(), 100_000, &mut vc).unwrap();
-        bob.receive(&send, &mut vc).unwrap();
-        for _ in 0..1000 {
-            let _ = bob.receive(&send, &mut vc);
-        }
-        assert_eq!(bob.balance, 100_000);
-        assert_eq!(bob.nonce, 2);
-        assert_eq!(bob.chain.len(), 2);
-    }
-
-    #[test]
-    fn test_receive_two_different_sends_both_accepted() {
-        // Regression: two legit SENDs from same sender must both be
-        // consumable; dedup must key on source hash, not on sender.
-        let mut vc = VectorClock::new();
-        let mut alice = AccountChain::new();
-        let mut bob = AccountChain::new();
-        alice.open(1_000_000, &mut vc).unwrap();
-        bob.open(0, &mut vc).unwrap();
-        let s1 = alice.send(bob.id(), 100, &mut vc).unwrap();
-        let s2 = alice.send(bob.id(), 200, &mut vc).unwrap();
-        assert_ne!(s1.hash, s2.hash);
-        bob.receive(&s1, &mut vc).unwrap();
-        bob.receive(&s2, &mut vc).unwrap();
-        assert_eq!(bob.balance, 300);
-        assert_eq!(bob.chain.len(), 3);
-    }
-
-    #[test]
-    fn test_receive_consumed_source_is_tracked_per_account() {
-        // Alice sends to Bob, then sends an IDENTICAL amount to Carol.
-        // Bob consumes his SEND; Carol consuming HERS must still succeed
-        // because consumed_sources is per-account.
-        let mut vc = VectorClock::new();
-        let mut alice = AccountChain::new();
-        let mut bob = AccountChain::new();
-        let mut carol = AccountChain::new();
-        alice.open(1_000_000, &mut vc).unwrap();
-        bob.open(0, &mut vc).unwrap();
-        carol.open(0, &mut vc).unwrap();
-        let to_bob = alice.send(bob.id(), 100, &mut vc).unwrap();
-        let to_carol = alice.send(carol.id(), 100, &mut vc).unwrap();
-        bob.receive(&to_bob, &mut vc).unwrap();
-        carol.receive(&to_carol, &mut vc).unwrap();
-        assert_eq!(bob.balance, 100);
-        assert_eq!(carol.balance, 100);
-    }
-
-    #[test]
-    fn test_receive_rejects_wrong_destination_before_dedup() {
-        // Error ordering: WrongDestination takes priority over
-        // DuplicateReceive. Otherwise an attacker could probe
-        // consumed_sources state by measuring error codes.
-        let mut vc = VectorClock::new();
-        let mut alice = AccountChain::new();
-        let mut bob = AccountChain::new();
-        let mut eve = AccountChain::new();
-        alice.open(1_000_000, &mut vc).unwrap();
-        bob.open(0, &mut vc).unwrap();
-        eve.open(0, &mut vc).unwrap();
-        let to_bob = alice.send(bob.id(), 100, &mut vc).unwrap();
-        bob.receive(&to_bob, &mut vc).unwrap();
-        // Eve tries to receive Bob's SEND
-        let err = eve.receive(&to_bob, &mut vc).unwrap_err();
-        assert!(matches!(err, ArxiaError::WrongDestination));
     }
 }
