@@ -38,3 +38,20 @@ pub const VC_PRUNING_AGE_DAYS: u64 = 7;
 
 /// One ARX in micro-ARX.
 pub const ONE_ARX: u64 = 1_000_000;
+
+/// Total protocol supply in micro-ARX (1,000,000,000 ARX).
+///
+/// Matches the tokenomics spec in the whitepaper. Used as the hard upper
+/// bound on what any single Open block can mint and, in a future commit,
+/// as the global supply accumulator ceiling.
+pub const TOTAL_SUPPLY_MICRO_ARX: u64 = 1_000_000_000 * ONE_ARX;
+
+/// Maximum `initial_balance` accepted by `AccountChain::open` for
+/// a single account, in micro-ARX (100,000,000 ARX = 10% of total supply).
+///
+/// This is a per-account ceiling applied statelessly at Open-time. A
+/// follow-up commit will add a global supply accumulator so that the sum
+/// of every live Open cannot exceed [`TOTAL_SUPPLY_MICRO_ARX`] either.
+/// Until then, the per-account cap is the first line of defense against
+/// unbounded self-mint (TODO Bug 3).
+pub const MAX_INITIAL_BALANCE_PER_ACCOUNT: u64 = 100_000_000 * ONE_ARX;
