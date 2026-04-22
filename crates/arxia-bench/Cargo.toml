@@ -13,7 +13,7 @@ arxia-crypto = { path = "../arxia-crypto" }
 arxia-lattice = { path = "../arxia-lattice" }
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["html_reports"] }
+criterion = { workspace = true }
 
 [[bench]]
 name = "crypto_bench"
