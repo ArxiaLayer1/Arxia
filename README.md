@@ -1,5 +1,7 @@
 # Arxia
 
+[![CI](https://github.com/ArxiaLayer1/Arxia/actions/workflows/ci.yml/badge.svg)](https://github.com/ArxiaLayer1/Arxia/actions/workflows/ci.yml)
+
 Offline-first Layer 1 blockchain operating over LoRa, BLE, SMS, and satellite.
 
 ## Overview
@@ -69,6 +71,18 @@ See [docs/guides/HARDWARE_SETUP.md](docs/guides/HARDWARE_SETUP.md).
 - [Guides](docs/guides/)
 - [Research](docs/research/)
 - [AIPs](docs/aips/)
+
+## Disclaimer
+
+Arxia is not affiliated with or endorsed by the Meshtastic project.
+Meshtastic is used as one of several swappable transport layers; Arxia
+is designed to operate over any compatible radio transport (raw LoRa,
+Reticulum, BLE, SMS, or satellite).
+
+## Repository History
+
+This repository was consolidated from a private workspace in March 2026.
+Commits from that point onward represent live, in-the-open development.
 
 ## License
 
