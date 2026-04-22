@@ -9,7 +9,6 @@
 Thumbs.db
 *.docx
 *.pdf
-/DOCS/
 .env
 .env.local
 lcov.info
