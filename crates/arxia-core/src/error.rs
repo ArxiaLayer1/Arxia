@@ -118,4 +118,30 @@ pub enum ArxiaError {
         /// The hash of the SEND block that was already received.
         source_hash: String,
     },
+
+    /// Two or more blocks with the same (account, nonce) seen during
+    /// reconciliation or registry merge. Distinct from `DoubleSpend` in
+    /// that this variant carries the competing block hashes for downstream
+    /// ORV resolution.
+    #[error("nonce conflict: account {account} nonce {nonce} has {count} competing blocks")]
+    NonceConflict {
+        /// Hex-encoded account public key.
+        account: String,
+        /// The conflicting nonce.
+        nonce: u64,
+        /// How many distinct blocks claimed this (account, nonce).
+        count: usize,
+    },
+
+    /// Reconciliation produced a negative balance for an account. This
+    /// signals that a double-spend or underflow was silently accepted
+    /// earlier in the merge and is the last-line defense against
+    /// corrupt state after partition merge.
+    #[error("negative balance after reconciliation: account {account} balance {balance}")]
+    NegativeBalance {
+        /// Hex-encoded account public key.
+        account: String,
+        /// The (negative) balance computed.
+        balance: i64,
+    },
 }
