@@ -159,10 +159,10 @@ mod tests {
     // ========================================================================
     // Regression guards for Bug 6 — timestamp-in-hash concern
     //
-    // stoneburner suggested that nodes with out-of-sync clocks would
-    // compute different hashes for the same block. This was NOT true of
-    // the code as written: compute_hash takes `timestamp` as a
-    // parameter, and from_compact_bytes reads it from the serialized
+    // The pre-launch audit raised a concern that nodes with out-of-sync
+    // clocks could compute different hashes for the same block. This was
+    // NOT true of the code as written: compute_hash takes `timestamp` as
+    // a parameter, and from_compact_bytes reads it from the serialized
     // payload. The hash is therefore a pure function of the bytes.
     //
     // The tests below pin that property so any future refactor that

@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_reconcile_double_spend_same_nonce_resolves_winner() {
-        // Reference scenario from stoneburner's audit.
+        // Reference scenario from the pre-launch audit.
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
         alice.open(1_000_000, &mut vc).unwrap();
