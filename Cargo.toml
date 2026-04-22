@@ -34,7 +34,7 @@ authors = []
 rust-version = "1.85.0"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/arxialayer1/arxia"
-homepage = "https://arxia.network"
+homepage = "https://arxia.one"
 description = "Layer 1 blockchain for offline-first mesh consensus"
 
 [workspace.dependencies]
