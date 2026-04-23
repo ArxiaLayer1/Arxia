@@ -613,6 +613,9 @@ name = "escrow"
 version = "0.1.0"
 dependencies = [
  "arxia-core",
+ "ed25519-dalek",
+ "hex",
+ "rand",
 ]
 
 [[package]]
