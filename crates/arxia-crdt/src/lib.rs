@@ -13,6 +13,6 @@ pub use or_set::ORSet;
 pub use pn_counter::PNCounter;
 pub use reconciliation::{
     reconcile_partitions, reconcile_partitions_balances_only, ReconciliationReport,
-    ResolvedConflict,
+    RejectedReceive, ResolvedConflict,
 };
 pub use vector_clock::CrdtVectorClock;
