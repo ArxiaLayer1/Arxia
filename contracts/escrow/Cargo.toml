@@ -9,3 +9,8 @@ authors = []
 
 [dependencies]
 arxia-core = { path = "../../crates/arxia-core" }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
