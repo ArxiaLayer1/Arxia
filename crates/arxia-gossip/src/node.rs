@@ -18,6 +18,14 @@ pub struct GossipNode {
     pub nonce_registry: NonceRegistry,
     /// Connected peer node IDs.
     pub peers: Vec<String>,
+    /// Conflicts accumulated across all `merge_registry` calls. A caller
+    /// who ignores the return value of `merge_registry` still finds every
+    /// detected conflict here, available for later ORV-based resolution.
+    ///
+    /// The field is drained by [`GossipNode::drain_pending_conflicts`];
+    /// consumers are expected to poll this from the consensus layer on
+    /// every L1-sync cycle.
+    pub pending_conflicts: Vec<NonceConflict>,
 }
 
 impl GossipNode {
@@ -28,6 +36,7 @@ impl GossipNode {
             known_blocks: Vec::new(),
             nonce_registry: NonceRegistry::new(),
             peers: Vec::new(),
+            pending_conflicts: Vec::new(),
         }
     }
 
@@ -69,10 +78,29 @@ impl GossipNode {
     }
 
     /// Merge a remote nonce registry into this node registry.
-    /// Returns the list of conflicts encountered (same `(account, nonce)`,
-    /// different hash). An empty vector means the merge was clean.
+    ///
+    /// Returns the list of conflicts encountered during this merge (same
+    /// `(account, nonce)` in both sides with different hashes). The same
+    /// conflicts are also appended to [`Self::pending_conflicts`] so that
+    /// a caller which ignores the return value does not silently lose
+    /// double-spend detection — a CRIT-009 regression guard.
+    ///
+    /// Callers SHOULD drain [`Self::pending_conflicts`] on every L1-sync
+    /// cycle and route the entries to ORV-based conflict resolution.
     pub fn merge_registry(&mut self, remote: &NonceRegistry) -> Vec<NonceConflict> {
-        merge_nonce_registries(&mut self.nonce_registry, remote)
+        let conflicts = merge_nonce_registries(&mut self.nonce_registry, remote);
+        // Defense-in-depth: even if the immediate caller drops the return
+        // value, the conflicts survive in pending_conflicts for later
+        // consumption by the consensus layer.
+        self.pending_conflicts.extend(conflicts.iter().cloned());
+        conflicts
+    }
+
+    /// Drain and return every conflict accumulated since the last drain.
+    /// Intended to be polled by the consensus / ORV layer; the internal
+    /// buffer is emptied on every call.
+    pub fn drain_pending_conflicts(&mut self) -> Vec<NonceConflict> {
+        std::mem::take(&mut self.pending_conflicts)
     }
 
     /// Check sync status against a peer registry.
@@ -166,5 +194,116 @@ mod tests {
         let conflicts = node.merge_registry(&remote);
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].key, (acc, 1));
+    }
+
+    // ========================================================================
+    // Adversarial tests for Bug CRIT-009 (merge_registry silently drops Vec)
+    //
+    // These tests pin the defense-in-depth property: conflicts are
+    // observable even when the immediate caller ignores the Vec returned
+    // by merge_registry.
+    // ========================================================================
+
+    #[test]
+    fn test_gossip_merge_registry_returns_conflicts_to_caller() {
+        // Canonical scenario: local has (Alice, 1) -> hash_bob; remote
+        // has (Alice, 1) -> hash_carol. Caller merges and receives the
+        // NonceConflict. Pre-008 behavior silently dropped the Vec.
+        let mut node = GossipNode::new("n1".into());
+        let alice = [0xAAu8; 32];
+        let hash_bob = [0xB0u8; 32];
+        let hash_carol = [0xCAu8; 32];
+        node.nonce_registry.insert((alice, 1), hash_bob);
+
+        let mut remote = NonceRegistry::new();
+        remote.insert((alice, 1), hash_carol);
+
+        let conflicts = node.merge_registry(&remote);
+        assert_eq!(conflicts.len(), 1, "merge_registry must surface conflicts");
+        let c = &conflicts[0];
+        assert_eq!(c.key, (alice, 1));
+        assert_eq!(c.local_hash, hash_bob);
+        assert_eq!(c.remote_hash, hash_carol);
+        // Local entry preserved (lattice-level handled by merge_nonce_registries)
+        assert_eq!(node.nonce_registry[&(alice, 1)], hash_bob);
+    }
+
+    #[test]
+    fn test_gossip_merge_registry_conflicts_survive_dropped_return() {
+        // Defense-in-depth: a caller that discards the Vec (the exact
+        // CRIT-009 pattern: `let _ = node.merge_registry(...)`) still
+        // finds every conflict in node.pending_conflicts, because
+        // merge_registry mirrors them into that field.
+        let mut node = GossipNode::new("n1".into());
+        let alice = [0xAAu8; 32];
+        node.nonce_registry.insert((alice, 1), [0xB0; 32]);
+
+        let mut remote = NonceRegistry::new();
+        remote.insert((alice, 1), [0xCA; 32]);
+
+        // Caller throws the return value on the floor.
+        let _ = node.merge_registry(&remote);
+
+        // Conflicts still accessible.
+        let drained = node.drain_pending_conflicts();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].key, (alice, 1));
+
+        // Second drain returns empty (idempotent by design).
+        assert!(node.drain_pending_conflicts().is_empty());
+    }
+
+    #[test]
+    fn test_gossip_merge_registry_pending_conflicts_accumulate_across_merges() {
+        // Multiple merges with different conflicts accumulate in
+        // pending_conflicts until drained.
+        let mut node = GossipNode::new("n1".into());
+        let alice = [0xAAu8; 32];
+        let bob = [0xBBu8; 32];
+        node.nonce_registry.insert((alice, 1), [0x01; 32]);
+        node.nonce_registry.insert((bob, 2), [0x02; 32]);
+
+        let mut r1 = NonceRegistry::new();
+        r1.insert((alice, 1), [0x11; 32]);
+        let mut r2 = NonceRegistry::new();
+        r2.insert((bob, 2), [0x22; 32]);
+
+        let _ = node.merge_registry(&r1);
+        let _ = node.merge_registry(&r2);
+
+        let drained = node.drain_pending_conflicts();
+        assert_eq!(drained.len(), 2, "both conflicts must be retained");
+    }
+
+    #[test]
+    fn test_gossip_merge_registry_no_conflict_no_pending_entry() {
+        // Clean merge (remote has only new entries, no overlap) must not
+        // pollute pending_conflicts with spurious entries.
+        let mut node = GossipNode::new("n1".into());
+        let alice = [0xAAu8; 32];
+        node.nonce_registry.insert((alice, 1), [0x01; 32]);
+
+        let mut remote = NonceRegistry::new();
+        remote.insert(([0xBBu8; 32], 5), [0x22; 32]);
+
+        let conflicts = node.merge_registry(&remote);
+        assert!(conflicts.is_empty());
+        assert!(node.pending_conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_gossip_merge_registry_idempotent_same_entry_no_conflict() {
+        // Identical (key, value) in local and remote is a no-op, not a
+        // conflict. Pending_conflicts must stay empty.
+        let mut node = GossipNode::new("n1".into());
+        let alice = [0xAAu8; 32];
+        node.nonce_registry.insert((alice, 1), [0x01; 32]);
+
+        let mut remote = NonceRegistry::new();
+        remote.insert((alice, 1), [0x01; 32]);
+
+        let conflicts = node.merge_registry(&remote);
+        assert!(conflicts.is_empty());
+        assert!(node.pending_conflicts.is_empty());
     }
 }
