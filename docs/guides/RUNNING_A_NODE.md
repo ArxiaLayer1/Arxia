@@ -115,7 +115,7 @@ name = "my-arxia-node"
 
 [network]
 bootstrap_peers = [
-    "/ip4/testnet.arxia.network/tcp/9000/p2p/QmXxxxx",
+    "/ip4/testnet.arxia.one/tcp/9000/p2p/QmXxxxx",
 ]
 listen_addr = "0.0.0.0:9000"
 
@@ -204,7 +204,7 @@ visible in the logs:
 **Faster initial sync via snapshot:**
 
 ```bash
-arxia-node sync --from-snapshot https://snapshots.arxia.network/latest
+arxia-node sync --from-snapshot https://snapshots.arxia.one/latest
 ```
 
 Snapshots are signed by the Arxia Foundation Ed25519 key and verified locally
