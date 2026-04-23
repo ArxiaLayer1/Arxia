@@ -14,3 +14,6 @@ arxia-lattice = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
