@@ -205,6 +205,8 @@ version = "0.1.0"
 dependencies = [
  "arxia-core",
  "arxia-crypto",
+ "ed25519-dalek",
+ "hex",
  "serde",
 ]
 
@@ -823,8 +825,10 @@ name = "mesh_relay"
 version = "0.1.0"
 dependencies = [
  "arxia-core",
+ "arxia-crypto",
  "arxia-relay",
  "arxia-transport",
+ "hex",
 ]
 
 [[package]]
