@@ -259,9 +259,23 @@ impl AccountChain {
                 source_hash: send_block.hash.clone(),
             });
         }
+        // CRIT-018 guard: reject overflowing receives BEFORE bumping
+        // vclock, balance, or nonce. A silent wrap would make the
+        // account's recorded balance smaller than the truth and the
+        // block would still hash-verify (the hash is computed over
+        // the wrapped value), allowing the attacker to destroy a
+        // victim's balance or to manufacture a supply-conservation
+        // violation across partitions.
+        let new_balance = self
+            .balance
+            .checked_add(amount)
+            .ok_or(ArxiaError::BalanceOverflow {
+                current: self.balance,
+                incoming: amount,
+            })?;
         let sid = self.public_key_hex[..8].to_string();
         vclock.tick(&sid);
-        self.balance += amount;
+        self.balance = new_balance;
         self.nonce += 1;
         let previous = self
             .chain
@@ -641,5 +655,99 @@ mod tests {
         // Eve tries to receive Bob's SEND
         let err = eve.receive(&to_bob, &mut vc).unwrap_err();
         assert!(matches!(err, ArxiaError::WrongDestination));
+    }
+
+    // ========================================================================
+    // CRIT-018 adversarial tests — balance overflow
+    // ========================================================================
+
+    #[test]
+    fn test_receive_overflow_returns_error_and_leaves_state_unchanged() {
+        // Bob's chain is (somehow) already near u64::MAX. An incoming
+        // SEND of a non-trivial amount MUST return BalanceOverflow and
+        // MUST NOT mutate balance, nonce, chain length, or vclock.
+        //
+        // Without the checked_add guard in receive(), `self.balance +=
+        // amount` wraps silently to a small value and the block still
+        // hash-verifies because the hash is computed over the wrapped
+        // balance. That is the CRIT-018 attack: a sender can destroy a
+        // victim's recorded balance or manufacture a supply-
+        // conservation violation across partitions.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        // Forcibly park Bob near u64::MAX. The supply cap prevents
+        // reaching this state via open(), but an attacker-influenced
+        // accumulation over many receives could.
+        bob.balance = u64::MAX - 10;
+        let pre_balance = bob.balance;
+        let pre_nonce = bob.nonce;
+        let pre_chain_len = bob.chain.len();
+        let pre_vc_clocks = vc.clocks.clone();
+
+        let send = alice.send(bob.id(), 100, &mut vc).unwrap();
+        let err = bob.receive(&send, &mut vc).unwrap_err();
+        match err {
+            ArxiaError::BalanceOverflow { current, incoming } => {
+                assert_eq!(current, pre_balance);
+                assert_eq!(incoming, 100);
+            }
+            other => panic!("expected BalanceOverflow, got {:?}", other),
+        }
+        assert_eq!(bob.balance, pre_balance, "balance must be untouched");
+        assert_eq!(bob.nonce, pre_nonce, "nonce must be untouched");
+        assert_eq!(bob.chain.len(), pre_chain_len, "chain must be untouched");
+        // vclock must NOT have ticked for Bob's shard on the overflow path.
+        let bob_sid = bob.id()[..8].to_string();
+        assert_eq!(
+            vc.clocks.get(&bob_sid),
+            pre_vc_clocks.get(&bob_sid),
+            "vclock must not tick on a rejected receive"
+        );
+    }
+
+    #[test]
+    fn test_receive_at_exact_u64_max_is_accepted() {
+        // Boundary: if current + amount == u64::MAX the result still
+        // fits, so receive MUST succeed and balance MUST be exactly
+        // u64::MAX.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        bob.balance = u64::MAX - 100;
+        let send = alice.send(bob.id(), 100, &mut vc).unwrap();
+        bob.receive(&send, &mut vc).expect("exact-fit receive");
+        assert_eq!(bob.balance, u64::MAX);
+    }
+
+    #[test]
+    fn test_receive_overflow_then_legit_receive_from_other_sender_still_works() {
+        // A rejected overflowing receive must not poison subsequent
+        // receives. Bob refuses Alice's overflowing SEND, then
+        // legitimately accepts a SEND from Carol with an amount that
+        // fits.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        let mut carol = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        carol.open(1_000, &mut vc).unwrap();
+        bob.balance = u64::MAX - 5;
+
+        let bad = alice.send(bob.id(), 100, &mut vc).unwrap();
+        assert!(matches!(
+            bob.receive(&bad, &mut vc),
+            Err(ArxiaError::BalanceOverflow { .. })
+        ));
+        // Bob is still accepting smaller amounts that fit.
+        bob.balance = 1_000; // return to a sensible state
+        let good = carol.send(bob.id(), 500, &mut vc).unwrap();
+        bob.receive(&good, &mut vc).expect("legit receive");
+        assert_eq!(bob.balance, 1_500);
     }
 }
