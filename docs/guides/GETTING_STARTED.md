@@ -44,12 +44,23 @@ cargo run --bin arxia-node
 ## CLI Tools
 
 ```bash
-# Generate a keypair
+# Generate a keypair (writes JSON {public_key, private_key} to a file).
+# Default output path is ./arxia_keypair.json in the current directory.
+# The private key is NEVER printed on stdout — only the public key and the
+# output path are shown. The file is created with create_new (refuses to
+# overwrite an existing keyfile) and on Unix is mode 0600.
 cargo run --bin arxia-cli -- keygen
+
+# Choose an explicit output path:
+cargo run --bin arxia-cli -- keygen --out=/path/to/keypair.json
+# (or:  cargo run --bin arxia-cli -- keygen --out /path/to/keypair.json)
 
 # Generate a DID
 cargo run --bin arxia-cli -- did
 ```
+
+> **Backup the keypair file offline.** It contains the only copy of the
+> Ed25519 secret seed. Never share it or commit it to version control.
 
 ## ESP32 Development
 
