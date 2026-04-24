@@ -124,7 +124,7 @@ impl RelayReceipt {
     ///
     /// Must be called before any state change (scoring, payout,
     /// slashing-waiver) trusts the receipt. See the CRIT-004 regression
-    /// guards in [`crate::scoring::tests`].
+    /// guards in `crate::scoring::tests` (compiled under `#[cfg(test)]`).
     pub fn verify(&self) -> Result<(), RelayReceiptError> {
         let msg = self.canonical_message()?;
         let pk = decode_hex_32(&self.relay_id).map_err(|_| RelayReceiptError::InvalidRelayId)?;
