@@ -47,6 +47,12 @@ pub enum RelayReceiptError {
     /// [`crate::scoring::RelayScore::record_success`] when the caller
     /// tries to route a receipt minted for another relay.
     WrongRelayId,
+    /// A receipt with this `message_hash` has already been credited
+    /// to this [`crate::scoring::RelayScore`]. Returned when the same
+    /// authentic receipt — or a differently-timestamped/hop-counted
+    /// but same-message receipt — is replayed. Closes CRIT-005
+    /// (duplicate-receipt reputation inflation).
+    DuplicateReceipt,
 }
 
 impl std::fmt::Display for RelayReceiptError {
@@ -64,6 +70,9 @@ impl std::fmt::Display for RelayReceiptError {
                 f.write_str("signature does not verify against the relay pubkey")
             }
             Self::WrongRelayId => f.write_str("receipt relay_id does not match the scored relay"),
+            Self::DuplicateReceipt => {
+                f.write_str("receipt with this message_hash has already been credited")
+            }
         }
     }
 }

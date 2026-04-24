@@ -1,5 +1,7 @@
 //! Relay node reputation scoring.
 
+use std::collections::HashSet;
+
 use crate::receipt::{RelayReceipt, RelayReceiptError};
 
 /// Reputation score for a relay node.
@@ -15,6 +17,17 @@ pub struct RelayScore {
     pub messages_relayed: u64,
     /// Total messages that failed or were dropped.
     pub messages_failed: u64,
+    /// Set of 32-byte `message_hash` values that have already been
+    /// credited to this score. Populated by
+    /// [`RelayScore::record_success`]; closes CRIT-005
+    /// (duplicate-receipt inflation).
+    ///
+    /// NOT `pub` — external code MUST NOT reach in and clear this
+    /// set, because doing so would reopen the CRIT-005 hole.
+    /// Storage grows monotonically with distinct relayed messages; a
+    /// fixed upper bound / LRU eviction policy is a separate concern
+    /// tracked as CRIT-011.
+    credited_messages: HashSet<[u8; 32]>,
 }
 
 impl RelayScore {
@@ -25,26 +38,43 @@ impl RelayScore {
             score: 100,
             messages_relayed: 0,
             messages_failed: 0,
+            credited_messages: HashSet::new(),
         }
     }
 
     /// Record a successful relay, backed by a signed [`RelayReceipt`].
     ///
-    /// This is the only way to credit a successful relay: the receipt's
-    /// Ed25519 signature is verified against the pubkey declared in
-    /// its `relay_id`, and that pubkey must match the scored relay's
-    /// `relay_id`. Either failure leaves the score unchanged and
-    /// returns an error.
+    /// Gates applied, in order, before any state mutation:
     ///
-    /// This closes CRIT-004 (forged-receipt reputation inflation): a
-    /// struct literal `RelayReceipt { signature: vec![0; 64], .. }`
-    /// can no longer bump the score because its signature fails to
-    /// verify under any pubkey.
+    /// 1. **Identity gate** — `receipt.relay_id` must match this
+    ///    score's `relay_id`, else [`RelayReceiptError::WrongRelayId`].
+    /// 2. **Authenticity gate** — `receipt.verify()` must succeed,
+    ///    else the variant it returns. Closes CRIT-004.
+    /// 3. **Dedup gate** — the `message_hash` must not already have
+    ///    been credited to this score, else
+    ///    [`RelayReceiptError::DuplicateReceipt`]. Closes CRIT-005:
+    ///    replaying the same authentic receipt (or a same-message
+    ///    receipt with a different timestamp / hop_count) now fails.
+    ///
+    /// On any `Err`, the score fields (`score`, `messages_relayed`,
+    /// `credited_messages`) are NOT mutated.
     pub fn record_success(&mut self, receipt: &RelayReceipt) -> Result<(), RelayReceiptError> {
         if receipt.relay_id != self.relay_id {
             return Err(RelayReceiptError::WrongRelayId);
         }
         receipt.verify()?;
+        // Decode once (verify() has already validated the format), then
+        // consult the dedup set. Using [u8; 32] as the key normalises
+        // hex casing and lets us reject byte-identical replays even if
+        // the attacker re-serialises the message_hash differently.
+        let msg_hash_bytes: [u8; 32] = hex::decode(&receipt.message_hash)
+            .map_err(|_| RelayReceiptError::InvalidMessageHash)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| RelayReceiptError::InvalidMessageHash)?;
+        if !self.credited_messages.insert(msg_hash_bytes) {
+            return Err(RelayReceiptError::DuplicateReceipt);
+        }
         self.messages_relayed += 1;
         self.score += 1;
         Ok(())
@@ -202,9 +232,10 @@ mod tests {
     #[test]
     fn test_relay_score_record_success_is_idempotent_in_failure_mode() {
         // Forged receipt submitted N times MUST still leave the score
-        // untouched. This is adjacent to the separate CRIT-005
-        // duplicate-dedup concern but also validates that a rejected
-        // receipt never partially mutates state.
+        // untouched. Validates that a rejected receipt (CRIT-004 gate)
+        // never partially mutates state — distinct from the CRIT-005
+        // dedup property tested below, which governs *accepted*
+        // receipts.
         let (_, vk) = generate_keypair();
         let pk = vk.to_bytes();
         let forged = RelayReceipt {
@@ -241,5 +272,166 @@ mod tests {
             score.record_success(&forged),
             Err(RelayReceiptError::InvalidSignatureLength)
         );
+    }
+
+    // ---- CRIT-005 adversarial regression guards (duplicate-receipt dedup) ----
+
+    #[test]
+    fn test_relay_score_ignores_duplicate_receipts() {
+        // The literal CRIT-005 attack: submit the SAME authentic
+        // receipt 100 times. Score must increment exactly once; the
+        // remaining 99 submissions must return Err(DuplicateReceipt)
+        // without mutating any counter.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let (receipt, relay_id) = signed_receipt_for(&sk, &pk, 77, 3);
+        let mut score = RelayScore::new(relay_id);
+
+        // First submission succeeds.
+        assert_eq!(score.record_success(&receipt), Ok(()));
+        assert_eq!(score.score, 101);
+        assert_eq!(score.messages_relayed, 1);
+
+        // Replays MUST be refused, score MUST stay pinned.
+        for _ in 0..99 {
+            assert_eq!(
+                score.record_success(&receipt),
+                Err(RelayReceiptError::DuplicateReceipt),
+            );
+        }
+        assert_eq!(
+            score.score, 101,
+            "100 submissions of same authentic receipt must credit exactly once"
+        );
+        assert_eq!(score.messages_relayed, 1);
+    }
+
+    #[test]
+    fn test_relay_score_dedup_ignores_timestamp_variance() {
+        // Attacker signs TWO authentic receipts for the same
+        // message_hash with different timestamps. Dedup must bind to
+        // the message, not the (message, timestamp) tuple — otherwise
+        // CRIT-005 is still exploitable by re-signing.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let (r1, relay_id) = signed_receipt_for(&sk, &pk, 100, 1);
+        let (r2, _) = signed_receipt_for(&sk, &pk, 200, 1);
+        assert_eq!(r1.message_hash, r2.message_hash, "helper uses fixed msg");
+
+        let mut score = RelayScore::new(relay_id);
+        assert_eq!(score.record_success(&r1), Ok(()));
+        assert_eq!(
+            score.record_success(&r2),
+            Err(RelayReceiptError::DuplicateReceipt),
+            "same message_hash at a later timestamp MUST NOT double-credit"
+        );
+        assert_eq!(score.score, 101);
+    }
+
+    #[test]
+    fn test_relay_score_dedup_ignores_hop_count_variance() {
+        // Same attack shape as timestamp variance: attacker re-signs
+        // with a different hop_count. Dedup must reject.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let (r1, relay_id) = signed_receipt_for(&sk, &pk, 5, 1);
+        let (r2, _) = signed_receipt_for(&sk, &pk, 5, 7);
+
+        let mut score = RelayScore::new(relay_id);
+        assert_eq!(score.record_success(&r1), Ok(()));
+        assert_eq!(
+            score.record_success(&r2),
+            Err(RelayReceiptError::DuplicateReceipt),
+        );
+        assert_eq!(score.score, 101);
+    }
+
+    #[test]
+    fn test_relay_score_dedup_admits_distinct_messages() {
+        // Baseline positive: three authentic receipts for three
+        // DIFFERENT messages must all credit. This ensures the dedup
+        // gate isn't a blanket "one credit per relay" cap.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let relay_id = hex::encode(pk);
+        let mut score = RelayScore::new(relay_id.clone());
+
+        for i in 0..3u8 {
+            let mut r = RelayReceipt {
+                relay_id: relay_id.clone(),
+                message_hash: hex::encode([i; 32]),
+                timestamp: 100 + u64::from(i),
+                signature: Vec::new(),
+                hop_count: 1,
+            };
+            r.signature = sign(&sk, &r.canonical_message().unwrap()).to_vec();
+            assert_eq!(score.record_success(&r), Ok(()));
+        }
+        assert_eq!(score.score, 103);
+        assert_eq!(score.messages_relayed, 3);
+    }
+
+    #[test]
+    fn test_relay_score_dedup_is_per_score_instance() {
+        // Two independent RelayScore instances for DIFFERENT relays
+        // must each be able to credit their own receipt for the same
+        // message_hash. Dedup state is per-instance, not global —
+        // otherwise two relays forwarding the same broadcast message
+        // would stomp on each other.
+        let (sk_a, vk_a) = generate_keypair();
+        let pk_a = vk_a.to_bytes();
+        let (sk_b, vk_b) = generate_keypair();
+        let pk_b = vk_b.to_bytes();
+        let shared_hash = hex::encode([0xCDu8; 32]);
+
+        let build = |sk: &ed25519_dalek::SigningKey, pk: &[u8; 32]| {
+            let mut r = RelayReceipt {
+                relay_id: hex::encode(pk),
+                message_hash: shared_hash.clone(),
+                timestamp: 1,
+                signature: Vec::new(),
+                hop_count: 1,
+            };
+            r.signature = sign(sk, &r.canonical_message().unwrap()).to_vec();
+            r
+        };
+
+        let r_a = build(&sk_a, &pk_a);
+        let r_b = build(&sk_b, &pk_b);
+
+        let mut score_a = RelayScore::new(hex::encode(pk_a));
+        let mut score_b = RelayScore::new(hex::encode(pk_b));
+        assert_eq!(score_a.record_success(&r_a), Ok(()));
+        assert_eq!(score_b.record_success(&r_b), Ok(()));
+        assert_eq!(score_a.score, 101);
+        assert_eq!(score_b.score, 101);
+    }
+
+    #[test]
+    fn test_relay_score_dedup_state_unchanged_on_rejected_receipt() {
+        // If a receipt is rejected (e.g. tampered signature), its
+        // message_hash MUST NOT be marked as credited. Otherwise a
+        // well-chosen forgery could lock a legitimate message out of
+        // future crediting.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let (mut tampered, relay_id) = signed_receipt_for(&sk, &pk, 10, 1);
+        let legit = tampered.clone();
+        tampered.timestamp = 9999; // breaks the signature
+
+        let mut score = RelayScore::new(relay_id);
+        assert_eq!(
+            score.record_success(&tampered),
+            Err(RelayReceiptError::SignatureInvalid),
+            "tampered receipt should be rejected on signature grounds"
+        );
+        // The same message_hash, on the ORIGINAL (untampered) receipt,
+        // must still be creditable.
+        assert_eq!(
+            score.record_success(&legit),
+            Ok(()),
+            "rejected receipt must not poison the dedup set"
+        );
+        assert_eq!(score.score, 101);
     }
 }
