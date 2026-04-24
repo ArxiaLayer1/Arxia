@@ -144,4 +144,15 @@ pub enum ArxiaError {
         /// The (negative) balance computed.
         balance: i64,
     },
+
+    /// An arithmetic operation on a balance would exceed `u64::MAX`.
+    /// Returned by code paths that refuse to silently wrap an
+    /// attacker-influenced addition (CRIT-018: `AccountChain::receive`).
+    #[error("balance overflow: current {current} + incoming {incoming} > u64::MAX")]
+    BalanceOverflow {
+        /// Current balance on the account.
+        current: u64,
+        /// Amount that would have been added.
+        incoming: u64,
+    },
 }
