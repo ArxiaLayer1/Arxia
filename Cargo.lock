@@ -149,8 +149,10 @@ dependencies = [
  "arxia-crypto",
  "arxia-lattice",
  "arxia-transport",
+ "ed25519-dalek",
  "hex",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
