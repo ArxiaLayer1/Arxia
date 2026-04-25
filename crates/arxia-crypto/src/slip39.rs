@@ -20,7 +20,7 @@ use crate::Unimplemented;
 ///
 /// # Status
 ///
-/// Always returns [`Err(Unimplemented)`] until a reviewed SLIP39
+/// Always returns `Err(Unimplemented)` until a reviewed SLIP39
 /// implementation is wired in. Do NOT deploy any wallet-backup flow
 /// that depends on this path.
 pub fn split_seed(
@@ -35,7 +35,7 @@ pub fn split_seed(
 ///
 /// # Status
 ///
-/// Always returns [`Err(Unimplemented)`] — see module docs and
+/// Always returns `Err(Unimplemented)` — see module docs and
 /// [`split_seed`].
 pub fn reconstruct_seed(_shares: &[Vec<u8>]) -> Result<[u8; 32], Unimplemented> {
     Err(Unimplemented)

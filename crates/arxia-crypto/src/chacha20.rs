@@ -21,7 +21,7 @@ use crate::Unimplemented;
 ///
 /// # Status
 ///
-/// Always returns [`Err(Unimplemented)`] until the ChaCha20-Poly1305
+/// Always returns `Err(Unimplemented)` until the ChaCha20-Poly1305
 /// scheme is wired through `chacha20poly1305` or an equivalent
 /// audited crate. Do NOT ship any caller that silently treats this
 /// as best-effort.
@@ -37,7 +37,7 @@ pub fn encrypt(
 ///
 /// # Status
 ///
-/// Always returns [`Err(Unimplemented)`] — see module docs and
+/// Always returns `Err(Unimplemented)` — see module docs and
 /// [`encrypt`].
 pub fn decrypt(
     _key: &[u8; 32],
