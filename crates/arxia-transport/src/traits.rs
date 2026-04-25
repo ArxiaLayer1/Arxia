@@ -29,6 +29,13 @@ pub enum TransportError {
     Disconnected,
     /// The message was lost (simulated packet loss).
     MessageLost,
+    /// The send-side buffer is at capacity. The caller MUST slow down or
+    /// drain its outbox before retrying. Returned by transports that bound
+    /// their outbox to prevent unbounded memory growth (CRIT-012).
+    BackPressure {
+        /// Configured capacity of the outbox (messages, not bytes).
+        capacity: usize,
+    },
     /// Generic transport error.
     Other(String),
 }
@@ -41,6 +48,9 @@ impl std::fmt::Display for TransportError {
             }
             Self::Disconnected => write!(f, "transport disconnected"),
             Self::MessageLost => write!(f, "message lost"),
+            Self::BackPressure { capacity } => {
+                write!(f, "transport outbox full (capacity {})", capacity)
+            }
             Self::Other(msg) => write!(f, "transport error: {}", msg),
         }
     }
