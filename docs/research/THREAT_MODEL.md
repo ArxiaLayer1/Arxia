@@ -67,8 +67,12 @@ propagation through alternative paths.
 **Threat**: An attacker obtains a user's private key.
 
 **Mitigation**:
-- ChaCha20-Poly1305 encryption for local key storage
-- SLIP39 seed backup for recovery
+- ChaCha20-Poly1305 encryption for local key storage *(planned;
+  `arxia_crypto::chacha20` currently returns `Err(Unimplemented)`
+  post-CRIT-002 / PR #41 — no on-disk encryption is active until the
+  real implementation lands)*
+- SLIP39 seed backup for recovery *(planned; `arxia_crypto::slip39`
+  also returns `Err(Unimplemented)` post-CRIT-003 / PR #41)*
 - Users should rotate keys periodically
 - REVOKE blocks invalidate compromised DID credentials
 
