@@ -1,6 +1,7 @@
 //! Offline payment example.
 
-use arxia_finality::{assess_finality, FinalityLevel};
+use arxia_crypto::{generate_keypair, sign};
+use arxia_finality::{assess_finality, FinalityLevel, SignedConfirmation, ValidatorRegistry};
 use arxia_gossip::SyncResult;
 use arxia_lattice::chain::{AccountChain, VectorClock};
 use arxia_lattice::validation::{verify_block, verify_chain_integrity};
@@ -43,7 +44,34 @@ fn main() {
     assert!(verify_chain_integrity(&alice.chain).is_ok());
     assert!(verify_chain_integrity(&bob.chain).is_ok());
 
-    let finality = assess_finality(5_000_000, 1, &SyncResult::Mismatch(0), 0.0);
+    // Build a one-node validator registry for the example: a fresh
+    // keypair signs an L0 confirmation over the send block. In a real
+    // deployment the registry is populated from the consensus layer
+    // and confirmations come from BLE-attached peers.
+    let send_block_hash: [u8; 32] = hex::decode(&send_block.hash)
+        .expect("valid hex")
+        .try_into()
+        .expect("32-byte hash");
+    let (witness_sk, witness_vk) = generate_keypair();
+    let witness_pk = witness_vk.to_bytes();
+    let canonical = SignedConfirmation::canonical_bytes(&witness_pk, &send_block_hash);
+    let confirmation = SignedConfirmation {
+        confirmer_pubkey: witness_pk,
+        block_hash: send_block_hash,
+        signature: sign(&witness_sk, &canonical).to_vec(),
+    };
+    let mut registry = ValidatorRegistry::new();
+    registry.insert(witness_pk, 1);
+
+    let finality = assess_finality(
+        5_000_000,
+        send_block_hash,
+        &[confirmation],
+        &SyncResult::Mismatch(0),
+        &[],
+        &registry,
+    )
+    .expect("authenticated finality should succeed");
     println!("Finality level: {}", finality);
     assert_eq!(finality, FinalityLevel::L0);
 

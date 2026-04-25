@@ -13,3 +13,4 @@ arxia-crypto = { path = "../../crates/arxia-crypto" }
 arxia-lattice = { path = "../../crates/arxia-lattice" }
 arxia-finality = { path = "../../crates/arxia-finality" }
 arxia-gossip = { path = "../../crates/arxia-gossip" }
+hex = { workspace = true }

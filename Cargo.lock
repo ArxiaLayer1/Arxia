@@ -137,7 +137,10 @@ name = "arxia-finality"
 version = "0.1.0"
 dependencies = [
  "arxia-core",
+ "arxia-crypto",
  "arxia-gossip",
+ "ed25519-dalek",
+ "serde",
 ]
 
 [[package]]
@@ -866,6 +869,7 @@ dependencies = [
  "arxia-finality",
  "arxia-gossip",
  "arxia-lattice",
+ "hex",
 ]
 
 [[package]]
