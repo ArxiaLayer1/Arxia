@@ -9,4 +9,9 @@ authors = []
 
 [dependencies]
 arxia-core = { path = "../arxia-core" }
+arxia-crypto = { path = "../arxia-crypto" }
 arxia-gossip = { path = "../arxia-gossip" }
+serde = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
