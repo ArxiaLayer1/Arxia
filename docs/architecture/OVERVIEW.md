@@ -33,7 +33,9 @@ state reconciliation.
 
 ```
 arxia-core (types, errors, constants)
-  +-- arxia-crypto (Ed25519, Blake3, ChaCha20, SLIP39)
+  +-- arxia-crypto (Ed25519, Blake3 — shipped;
+                    ChaCha20, SLIP39 — stub: Err(Unimplemented), see
+                    docs/protocol/CRYPTOGRAPHY.md)
        +-- arxia-lattice (Block, AccountChain, VectorClock)
        |    +-- arxia-crdt (PNCounter, ORSet, reconciliation)
        |    +-- arxia-consensus (ORV votes, conflict resolution, quorum)
