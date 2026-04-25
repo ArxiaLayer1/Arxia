@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use crate::receipt::{RelayReceipt, RelayReceiptError};
+use crate::slashing::{SlashingError, SlashingProof};
 
 /// Reputation score for a relay node.
 #[derive(Debug, Clone)]
@@ -88,9 +89,33 @@ impl RelayScore {
         self.score -= 5;
     }
 
-    /// Apply slashing penalty for proven misbehavior.
-    pub fn slash(&mut self, penalty: i64) {
-        self.score -= penalty;
+    /// Apply a slashing penalty for proven misbehavior.
+    ///
+    /// Gates applied, in order:
+    ///
+    /// 1. `penalty >= 0` — slashing cannot gift score.
+    /// 2. `proof.target_relay_id == self.relay_id` — the claim must
+    ///    target this specific relay.
+    /// 3. `proof.verify()` — the observer's Ed25519 signature must
+    ///    authenticate the claim.
+    ///
+    /// On success the score decreases via `saturating_sub`, so no
+    /// penalty value (even `i64::MAX`) can wrap past `i64::MIN`.
+    /// This closes CRIT-006 in two places: no caller can slash
+    /// without a valid observer signature, and the arithmetic is
+    /// no longer underflow-prone.
+    ///
+    /// See `crate::slashing` for the observer-registry limitation.
+    pub fn slash(&mut self, penalty: i64, proof: &SlashingProof) -> Result<(), SlashingError> {
+        if penalty < 0 {
+            return Err(SlashingError::NegativePenalty);
+        }
+        if proof.target_relay_id != self.relay_id {
+            return Err(SlashingError::TargetMismatch);
+        }
+        proof.verify()?;
+        self.score = self.score.saturating_sub(penalty);
+        Ok(())
     }
 
     /// Whether this relay is in good standing.
@@ -154,12 +179,167 @@ mod tests {
         assert_eq!(score.messages_failed, 1);
     }
 
+    fn signed_slashing_proof(
+        observer_sk: &ed25519_dalek::SigningKey,
+        observer_pk: [u8; 32],
+        target_relay_id: &str,
+        reason: &str,
+    ) -> SlashingProof {
+        let mut p = SlashingProof {
+            observer_pubkey: observer_pk,
+            target_relay_id: target_relay_id.to_string(),
+            reason: reason.to_string(),
+            signature: Vec::new(),
+        };
+        let msg = p.canonical_message().unwrap();
+        p.signature = sign(observer_sk, &msg).to_vec();
+        p
+    }
+
     #[test]
-    fn test_relay_score_slashing() {
-        let mut score = RelayScore::new(hex::encode([0u8; 32]));
-        score.slash(150);
+    fn test_relay_score_slashing_with_valid_proof_reduces_score() {
+        let (observer_sk, observer_vk) = generate_keypair();
+        let relay_id = hex::encode([0x77u8; 32]);
+        let mut score = RelayScore::new(relay_id.clone());
+        let proof = signed_slashing_proof(
+            &observer_sk,
+            observer_vk.to_bytes(),
+            &relay_id,
+            "double-signed receipt",
+        );
+        assert!(score.slash(150, &proof).is_ok());
         assert_eq!(score.score, -50);
         assert!(!score.is_trusted());
+    }
+
+    // ---- CRIT-006 adversarial regression guards ----
+
+    #[test]
+    fn test_slash_rejects_unsigned_proof() {
+        // Zero-signature proof: literal CRIT-006 attack.
+        let (_, observer_vk) = generate_keypair();
+        let relay_id = hex::encode([0x77u8; 32]);
+        let mut score = RelayScore::new(relay_id.clone());
+        let before = score.score;
+        let proof = SlashingProof {
+            observer_pubkey: observer_vk.to_bytes(),
+            target_relay_id: relay_id,
+            reason: "unauth".to_string(),
+            signature: vec![0u8; 64],
+        };
+        assert_eq!(
+            score.slash(100, &proof),
+            Err(SlashingError::SignatureInvalid)
+        );
+        assert_eq!(score.score, before);
+    }
+
+    #[test]
+    fn test_slash_rejects_proof_for_wrong_target() {
+        // Observer A signs a proof targeting relay X; caller tries
+        // to apply it to relay Y's score.
+        let (observer_sk, observer_vk) = generate_keypair();
+        let target_relay_id = hex::encode([0x11u8; 32]);
+        let other_relay_id = hex::encode([0x22u8; 32]);
+        let proof =
+            signed_slashing_proof(&observer_sk, observer_vk.to_bytes(), &target_relay_id, "r");
+        let mut other_score = RelayScore::new(other_relay_id);
+        assert_eq!(
+            other_score.slash(100, &proof),
+            Err(SlashingError::TargetMismatch)
+        );
+        assert_eq!(other_score.score, 100);
+    }
+
+    #[test]
+    fn test_slash_rejects_negative_penalty() {
+        // A negative penalty would be `saturating_sub(neg)` which
+        // adds score — a gift dressed as a slash.
+        let (observer_sk, observer_vk) = generate_keypair();
+        let relay_id = hex::encode([0x77u8; 32]);
+        let proof = signed_slashing_proof(&observer_sk, observer_vk.to_bytes(), &relay_id, "r");
+        let mut score = RelayScore::new(relay_id);
+        assert_eq!(
+            score.slash(-50, &proof),
+            Err(SlashingError::NegativePenalty)
+        );
+        assert_eq!(score.score, 100, "score unchanged on negative penalty");
+    }
+
+    #[test]
+    fn test_slash_i64_max_penalty_does_not_wrap_to_positive() {
+        // Key CRIT-006 arithmetic: pre-fix `self.score -= penalty`
+        // with penalty == i64::MAX can wrap a near-zero score past
+        // i64::MIN to a positive value. `saturating_sub` clamps to
+        // i64::MIN instead — a large-negative score is still bad
+        // news, but it is not "trusted".
+        let (observer_sk, observer_vk) = generate_keypair();
+        let relay_id = hex::encode([0x77u8; 32]);
+        let proof = signed_slashing_proof(&observer_sk, observer_vk.to_bytes(), &relay_id, "r");
+        let mut score = RelayScore::new(relay_id);
+        score
+            .slash(i64::MAX, &proof)
+            .expect("max penalty should succeed via saturation");
+        assert!(
+            score.score < 0,
+            "score after i64::MAX slash must be negative, got {}",
+            score.score
+        );
+        assert!(!score.is_trusted());
+    }
+
+    #[test]
+    fn test_slash_saturates_exactly_at_i64_min() {
+        // Drive the score pre-emptively to a value where `slash(i64::MAX)`
+        // would underflow past i64::MIN without saturation. Verify
+        // the actual floor is i64::MIN, not a wrapped positive.
+        let (observer_sk, observer_vk) = generate_keypair();
+        let relay_id = hex::encode([0x77u8; 32]);
+        let proof = signed_slashing_proof(&observer_sk, observer_vk.to_bytes(), &relay_id, "r");
+        let mut score = RelayScore::new(relay_id);
+        score.score = -100; // set below zero so MIN underflows cleanly
+        score.slash(i64::MAX, &proof).unwrap();
+        assert_eq!(
+            score.score,
+            i64::MIN,
+            "saturating_sub must clamp to i64::MIN"
+        );
+    }
+
+    #[test]
+    fn test_slash_rejects_proof_signed_by_other_observer() {
+        // Observer A signs a proof for relay X; caller tries to
+        // pass it off as signed by observer B. The pubkey→signature
+        // mismatch must be caught.
+        let (sk_a, vk_a) = generate_keypair();
+        let (_, vk_b) = generate_keypair();
+        let relay_id = hex::encode([0x77u8; 32]);
+        let mut proof = signed_slashing_proof(&sk_a, vk_a.to_bytes(), &relay_id, "r");
+        proof.observer_pubkey = vk_b.to_bytes();
+        let mut score = RelayScore::new(relay_id);
+        assert_eq!(
+            score.slash(100, &proof),
+            Err(SlashingError::SignatureInvalid)
+        );
+        assert_eq!(score.score, 100);
+    }
+
+    #[test]
+    fn test_slash_gate_order_negative_penalty_before_signature_check() {
+        // A negative penalty on an UNSIGNED proof must still return
+        // NegativePenalty, not SignatureInvalid — the cheap check
+        // runs first so a caller with zero evidence gets crisp
+        // feedback on the primary mistake.
+        let (_, observer_vk) = generate_keypair();
+        let relay_id = hex::encode([0x77u8; 32]);
+        let mut score = RelayScore::new(relay_id.clone());
+        let proof = SlashingProof {
+            observer_pubkey: observer_vk.to_bytes(),
+            target_relay_id: relay_id,
+            reason: String::new(),
+            signature: Vec::new(),
+        };
+        assert_eq!(score.slash(-1, &proof), Err(SlashingError::NegativePenalty),);
     }
 
     // ---- CRIT-004 adversarial regression guards ----

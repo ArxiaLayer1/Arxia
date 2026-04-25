@@ -5,6 +5,8 @@
 
 pub mod receipt;
 pub mod scoring;
+pub mod slashing;
 
 pub use receipt::RelayReceipt;
 pub use scoring::RelayScore;
+pub use slashing::{SlashingError, SlashingProof};
