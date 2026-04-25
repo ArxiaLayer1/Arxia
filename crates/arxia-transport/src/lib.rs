@@ -10,5 +10,5 @@
 pub mod sim;
 pub mod traits;
 
-pub use sim::simulated::SimulatedTransport;
+pub use sim::simulated::{SimulatedTransport, DEFAULT_INBOX_CAPACITY, DEFAULT_OUTBOX_CAPACITY};
 pub use traits::{TransportError, TransportMessage, TransportTrait};
