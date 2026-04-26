@@ -155,4 +155,12 @@ pub enum ArxiaError {
         /// Amount that would have been added.
         incoming: u64,
     },
+
+    /// `AccountChain::send` was called with a destination equal to the
+    /// sender's own public key (HIGH-002). Self-sends inflate the
+    /// nonce without an economic effect and, combined with any
+    /// dedup-bypass on the receive path, become a free-mint vector.
+    /// Refused at `send()` time before any state mutation.
+    #[error("send rejected: destination equals sender (self-send not allowed)")]
+    SelfSendNotAllowed,
 }

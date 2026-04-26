@@ -173,6 +173,17 @@ impl AccountChain {
     }
 
     /// Send funds to a destination account.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`ArxiaError::ZeroAmount`] if `amount == 0`.
+    /// - [`ArxiaError::SelfSendNotAllowed`] if `destination` equals
+    ///   the sender's own public key hex (HIGH-002, closed in commit 029).
+    ///   Self-sends inflate the nonce without an economic effect and,
+    ///   combined with any dedup-bypass on the receive path, would
+    ///   become a free-mint vector.
+    /// - [`ArxiaError::InsufficientBalance`] if `self.balance < amount`.
     pub fn send(
         &mut self,
         destination: &str,
@@ -181,6 +192,14 @@ impl AccountChain {
     ) -> Result<Block, ArxiaError> {
         if amount == 0 {
             return Err(ArxiaError::ZeroAmount);
+        }
+        // HIGH-002 (commit 029): reject self-sends BEFORE any state
+        // mutation. The check fires before `balance < amount` so a
+        // self-send always reports the structural error, not the
+        // semantic one (insufficient balance), regardless of the
+        // sender's funds.
+        if destination == self.public_key_hex {
+            return Err(ArxiaError::SelfSendNotAllowed);
         }
         if self.balance < amount {
             return Err(ArxiaError::InsufficientBalance {
@@ -749,5 +768,134 @@ mod tests {
         let good = carol.send(bob.id(), 500, &mut vc).unwrap();
         bob.receive(&good, &mut vc).expect("legit receive");
         assert_eq!(bob.balance, 1_500);
+    }
+
+    // ========================================================================
+    // Adversarial tests for HIGH-002 (self-send rejection)
+    //
+    // AccountChain::send must reject `destination == self.public_key_hex`
+    // BEFORE any state mutation. Self-sends inflate the nonce without
+    // an economic effect and, combined with any future dedup-bypass on
+    // receive, become a free-mint vector.
+    // ========================================================================
+
+    #[test]
+    fn test_send_rejects_self_destination() {
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        let nonce_before = alice.nonce;
+        let balance_before = alice.balance;
+        let chain_len_before = alice.chain.len();
+
+        // Self-send: alice → alice. Use a local for the destination
+        // because `alice.send(alice.id(), ...)` would cross-borrow.
+        let alice_id = alice.id().to_string();
+        let result = alice.send(&alice_id, 100, &mut vc);
+        assert!(
+            matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
+            "self-send must be rejected with SelfSendNotAllowed, got {:?}",
+            result
+        );
+
+        // No state was mutated (the rejection fires BEFORE any tick /
+        // balance update / nonce increment / chain push).
+        assert_eq!(alice.nonce, nonce_before, "nonce must not change");
+        assert_eq!(alice.balance, balance_before, "balance must not change");
+        assert_eq!(
+            alice.chain.len(),
+            chain_len_before,
+            "chain must not gain a block"
+        );
+    }
+
+    #[test]
+    fn test_send_self_check_fires_before_balance_check() {
+        // Even with zero balance, a self-send must report
+        // SelfSendNotAllowed (the structural error), NOT
+        // InsufficientBalance (the semantic error). Pinned because the
+        // priority is checked in the implementation.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        alice.open(0, &mut vc).unwrap();
+        assert_eq!(alice.balance, 0);
+
+        let alice_id = alice.id().to_string();
+        let result = alice.send(&alice_id, 1_000_000, &mut vc);
+        assert!(
+            matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
+            "structural self-send check must take priority over balance, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_send_self_check_fires_before_zero_amount_check() {
+        // Order of checks: amount=0 fires FIRST (it's even more
+        // structural — 0-amount sends are nonsense regardless of
+        // destination). Pin this so the implementation order is
+        // documented.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+
+        // Both pathological inputs at once: amount = 0 AND self-send.
+        // The earlier check (ZeroAmount) wins.
+        let alice_id = alice.id().to_string();
+        let result = alice.send(&alice_id, 0, &mut vc);
+        assert!(
+            matches!(result, Err(ArxiaError::ZeroAmount)),
+            "ZeroAmount must take priority over SelfSendNotAllowed when both apply, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_send_to_other_destination_unaffected() {
+        // Regression guard: legitimate alice → bob still works.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let bob = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+
+        let block = alice
+            .send(bob.id(), 100, &mut vc)
+            .expect("legitimate cross-account send must succeed");
+        assert!(matches!(block.block_type, BlockType::Send { .. }));
+        assert_eq!(alice.balance, 999_900);
+        assert_eq!(alice.nonce, 2);
+    }
+
+    #[test]
+    fn test_send_destination_one_byte_different_from_self_succeeds() {
+        // The self-check is exact equality, not prefix or substring.
+        // A destination that DIFFERS from self.public_key_hex by even
+        // one character must not trigger SelfSendNotAllowed; the
+        // function falls through to the InsufficientBalance check
+        // (or to a successful send, depending on funds).
+        //
+        // We construct a "near-self" destination by flipping the
+        // last hex digit of alice's pubkey. This is not a valid
+        // pubkey for any real account, but `send` does not validate
+        // the destination's structure — that's the receive side's
+        // job.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+
+        let mut near_self = alice.id().to_string();
+        let last = near_self.pop().unwrap();
+        let flipped = if last == 'f' { '0' } else { 'f' };
+        near_self.push(flipped);
+        assert_ne!(near_self, alice.id());
+
+        let result = alice.send(&near_self, 100, &mut vc);
+        // Self-check must NOT fire. The send proceeds and either
+        // succeeds or fails the balance check; either way, NOT
+        // SelfSendNotAllowed.
+        assert!(
+            !matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
+            "destination one byte different from self must not trigger SelfSendNotAllowed"
+        );
     }
 }
