@@ -64,7 +64,7 @@ use serde::{Deserialize, Serialize};
 
 use arxia_core::ArxiaError;
 
-use crate::message::GossipMessage;
+use crate::message::{GossipMessage, MessageError};
 
 /// Domain-separation prefix for the Ed25519 signature on a
 /// [`SignedGossipMessage`].
@@ -104,6 +104,12 @@ pub enum SignedGossipMessageError {
     /// declared `sender_pubkey`. This is the exploit surface for
     /// CRIT-010 and for any tampering of message fields.
     SignatureInvalid,
+    /// The wrapped [`GossipMessage`] failed [`GossipMessage::validate`]
+    /// before any cryptographic work was attempted (HIGH-008+ caps).
+    /// Carries the structural reason. Surfaced for size-bound /
+    /// length-bound violations such as oversized
+    /// `BlockAnnounce::block_data` payloads.
+    MessageInvalid(MessageError),
 }
 
 impl std::fmt::Display for SignedGossipMessageError {
@@ -116,6 +122,7 @@ impl std::fmt::Display for SignedGossipMessageError {
             Self::SignatureInvalid => {
                 f.write_str("signature does not verify against the sender pubkey")
             }
+            Self::MessageInvalid(e) => write!(f, "gossip message structurally invalid: {}", e),
         }
     }
 }
@@ -182,6 +189,14 @@ impl SignedGossipMessage {
     /// peer — that is a separate registry concern (see module-level
     /// "Limitations").
     pub fn verify(&self) -> Result<(), SignedGossipMessageError> {
+        // Cheap structural check first (HIGH-008+ caps): an oversized
+        // `BlockAnnounce::block_data` (or any future capped variant)
+        // is rejected without invoking expensive cryptographic work,
+        // closing the OOM-by-flood vector at the cheapest gate.
+        self.message
+            .validate()
+            .map_err(SignedGossipMessageError::MessageInvalid)?;
+
         if self.signature.len() != 64 {
             return Err(SignedGossipMessageError::InvalidSignatureLength);
         }
@@ -524,5 +539,95 @@ mod tests {
         assert_eq!(s.sender_pubkey, s2.sender_pubkey);
         assert_eq!(s.signature, s2.signature);
         assert!(s2.verify().is_ok());
+    }
+
+    // --- HIGH-008: oversized BlockAnnounce rejected before crypto ---
+
+    #[test]
+    fn test_verify_rejects_oversized_block_announce_with_message_invalid() {
+        // An attacker sends a BlockAnnounce whose `block_data` exceeds
+        // MAX_BLOCK_ANNOUNCE_BYTES. verify() must reject with
+        // MessageInvalid (the cheap structural error variant) and NOT
+        // SignatureInvalid — confirming that the structural check
+        // runs BEFORE any crypto work, closing the OOM-by-flood
+        // vector at the cheapest possible gate.
+        use crate::message::{MessageError, MAX_BLOCK_ANNOUNCE_BYTES};
+        let oversized = block_announce(vec![0u8; MAX_BLOCK_ANNOUNCE_BYTES + 1], 0);
+        // Build a structurally-correct envelope: real keypair + correct
+        // signature on the (oversized) canonical bytes. The signature
+        // would actually verify if the cheap check were skipped.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let canonical = SignedGossipMessage::canonical_bytes(&oversized, &pk);
+        let sig = sign(&sk, &canonical);
+        let s = SignedGossipMessage {
+            message: oversized,
+            sender_pubkey: pk,
+            signature: sig.to_vec(),
+        };
+
+        let err = s.verify().unwrap_err();
+        match err {
+            SignedGossipMessageError::MessageInvalid(MessageError::BlockAnnounceTooLarge {
+                size,
+                max,
+            }) => {
+                assert_eq!(size, MAX_BLOCK_ANNOUNCE_BYTES + 1);
+                assert_eq!(max, MAX_BLOCK_ANNOUNCE_BYTES);
+            }
+            other => panic!(
+                "expected MessageInvalid(BlockAnnounceTooLarge), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_verify_at_max_block_announce_size_passes() {
+        // The boundary case: block_data of EXACTLY
+        // MAX_BLOCK_ANNOUNCE_BYTES is accepted (the cap is
+        // strict-greater-than, not greater-than-or-equal). A
+        // legitimate batch of 64 compact blocks must fit.
+        use crate::message::MAX_BLOCK_ANNOUNCE_BYTES;
+        let max_size = block_announce(vec![0u8; MAX_BLOCK_ANNOUNCE_BYTES], 0);
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let canonical = SignedGossipMessage::canonical_bytes(&max_size, &pk);
+        let sig = sign(&sk, &canonical);
+        let s = SignedGossipMessage {
+            message: max_size,
+            sender_pubkey: pk,
+            signature: sig.to_vec(),
+        };
+        assert!(
+            s.verify().is_ok(),
+            "envelope at exactly MAX_BLOCK_ANNOUNCE_BYTES must verify"
+        );
+    }
+
+    #[test]
+    fn test_verify_oversized_block_announce_short_circuits_before_crypto() {
+        // Same as the rejection test above, but with an INVALID
+        // signature. Even though the crypto step would fail anyway,
+        // the size check fires first — verify returns MessageInvalid,
+        // not SignatureInvalid. Confirms the order of checks.
+        use crate::message::{MessageError, MAX_BLOCK_ANNOUNCE_BYTES};
+        let oversized = block_announce(vec![0u8; MAX_BLOCK_ANNOUNCE_BYTES + 1], 0);
+        let s = SignedGossipMessage {
+            message: oversized,
+            sender_pubkey: [0xAAu8; 32], // arbitrary; would fail crypto
+            signature: vec![0u8; 64],    // zero sig; would fail crypto
+        };
+        let err = s.verify().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SignedGossipMessageError::MessageInvalid(
+                    MessageError::BlockAnnounceTooLarge { .. }
+                )
+            ),
+            "size check must run before crypto; got {:?}",
+            err
+        );
     }
 }
