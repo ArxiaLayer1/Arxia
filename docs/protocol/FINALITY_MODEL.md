@@ -67,20 +67,47 @@ The canonical stateless assessment is
 ```rust
 pub fn assess_finality(
     amount_micro_arx: u64,
-    local_confirmations: u32,
+    block_hash: [u8; 32],
+    confirmations: &[SignedConfirmation],
     sync_result: &SyncResult,
-    validator_pct: f64,
-) -> FinalityLevel {
-    if validator_pct >= 0.67 {
-        return FinalityLevel::L2;
+    votes: &[SignedValidatorVote],
+    registry: &ValidatorRegistry,
+) -> Result<FinalityLevel, FinalityError> {
+    let total_stake = registry.total_stake();
+    if total_stake > 0 {
+        let mut counted = HashSet::new();
+        let mut accepted_stake = 0u64;
+        for vote in votes {
+            if vote.block_hash != block_hash { continue; }
+            if !registry.contains(&vote.validator_pubkey) { continue; }
+            vote.verify()?;
+            if counted.insert(vote.validator_pubkey) {
+                accepted_stake = accepted_stake.saturating_add(
+                    registry.stake_of(&vote.validator_pubkey).unwrap_or(0));
+            }
+        }
+        // Integer-ratio comparison ≥ 67 % (no f64 rounding at u64::MAX scale).
+        if accepted_stake.saturating_mul(100)
+            >= total_stake.saturating_mul(67)
+        {
+            return Ok(FinalityLevel::L2);
+        }
     }
     if *sync_result == SyncResult::Success {
-        return FinalityLevel::L1;
+        return Ok(FinalityLevel::L1);
     }
-    if amount_micro_arx <= L0_CAP_MICRO_ARX && local_confirmations > 0 {
-        return FinalityLevel::L0;
+    if amount_micro_arx <= L0_CAP_MICRO_ARX {
+        let mut seen = HashSet::new();
+        for conf in confirmations {
+            if conf.block_hash != block_hash { continue; }
+            if !registry.contains(&conf.confirmer_pubkey) { continue; }
+            conf.verify()?;
+            if seen.insert(conf.confirmer_pubkey) {
+                return Ok(FinalityLevel::L0);
+            }
+        }
     }
-    FinalityLevel::Pending
+    Ok(FinalityLevel::Pending)
 }
 ```
 
@@ -88,23 +115,63 @@ Evaluation is top-down and short-circuits at the first match. The order
 is L2 → L1 → L0 → Pending, so validator consensus always dominates and
 small-amount local confirmation is the weakest non-trivial tier.
 
+### 3.0. CRIT-007 / CRIT-008 mitigation
+
+The pre-fix `assess_finality` took `validator_pct: f64` and
+`local_confirmations: u32` directly from the caller. Any caller could
+spoof L2 (`validator_pct = 1.0`) or L0/L1 (`local_confirmations =
+u32::MAX`) without supplying a single signed witness. The whole
+finality model trusted the caller's numbers (audit findings
+**CRIT-007** + **CRIT-008**, closed by PR #47).
+
+The current API replaces those scalars with authenticated inputs:
+
+- `confirmations: &[SignedConfirmation]` — Ed25519-signed by a
+  registered node, bound to `block_hash` under domain prefix
+  `arxia-finality-confirmation-v1`.
+- `votes: &[SignedValidatorVote]` — Ed25519-signed by a registered
+  validator, bound to `block_hash` under domain prefix
+  `arxia-finality-validator-vote-v1` (distinct from the confirmation
+  domain — no cross-protocol replay).
+- `registry: &ValidatorRegistry` — pubkey → stake-micro-ARX map; the
+  trusted set against which votes/confirmations are filtered and
+  stakes tallied. The registry is caller-populated today; on-chain
+  sync from the consensus layer is tracked in §9.
+
+`assess_finality` now returns `Result<FinalityLevel, FinalityError>`:
+
+- `Ok(FinalityLevel::*)` — assessment succeeded.
+- `Err(FinalityError::SignatureInvalid)` — a registered key's
+  signature did NOT verify. This is loud failure (actionable
+  evidence of misbehavior) rather than silent skip.
+- `Err(FinalityError::InvalidPublicKey)` /
+  `Err(FinalityError::InvalidSignatureLength)` — structurally
+  invalid input from a registered key.
+
+A non-registered pubkey on a vote/confirmation is silently filtered
+(it doesn't count, but it doesn't fail the call). A `block_hash`
+mismatch is silently filtered (the input belongs to another
+transaction).
+
 ### 3.1. Predicate table
 
-| Predicate                                                          | Result       |
-|--------------------------------------------------------------------|:------------:|
-| `validator_pct >= 0.67`                                            | `L2`         |
-| `sync_result == SyncResult::Success`                               | `L1`         |
-| `amount <= L0_CAP_MICRO_ARX && local_confirmations > 0`            | `L0`         |
-| otherwise                                                          | `Pending`    |
+| Predicate                                                                                                | Result        |
+|----------------------------------------------------------------------------------------------------------|:-------------:|
+| Sum of distinct registered-validator stake whose votes verify for `block_hash` ≥ 67 % of total stake     | `L2`          |
+| `sync_result == SyncResult::Success`                                                                     | `L1`          |
+| `amount <= L0_CAP_MICRO_ARX` AND ≥ 1 distinct registered-confirmer signature verifies for `block_hash`   | `L0`          |
+| otherwise                                                                                                | `Pending`     |
 
 ### 3.2. Inputs
 
-| Input                 | Type          | Source |
-|-----------------------|---------------|--------|
-| `amount_micro_arx`    | `u64`         | Block payload (SEND `amount`, RECEIVE's referenced SEND, OPEN `initial_balance`, `0` for REVOKE). |
-| `local_confirmations` | `u32`         | Count of distinct local confirmations (BLE / same-radio neighbors). |
-| `sync_result`         | `&SyncResult` | Output of [`sync_nonces_before_l1`](../../crates/arxia-gossip/src/nonce_registry.rs). |
-| `validator_pct`       | `f64`         | Fraction of total staked supply (in `[0.0, 1.0]`) whose ORV votes have been verified for this block. |
+| Input                 | Type                        | Source |
+|-----------------------|-----------------------------|--------|
+| `amount_micro_arx`    | `u64`                       | Block payload (SEND `amount`, RECEIVE's referenced SEND, OPEN `initial_balance`, `0` for REVOKE). |
+| `block_hash`          | `[u8; 32]`                  | Hash of the block being assessed. Confirmations / votes whose `block_hash` does not match are silently filtered. |
+| `confirmations`       | `&[SignedConfirmation]`     | Signed L0 confirmations from registered nodes. Each carries an Ed25519 signature over `domain || confirmer_pubkey || block_hash`. |
+| `sync_result`         | `&SyncResult`               | Output of [`sync_nonces_before_l1`](../../crates/arxia-gossip/src/nonce_registry.rs). |
+| `votes`               | `&[SignedValidatorVote]`    | Signed L2 votes from registered validators. Each carries an Ed25519 signature over `domain || validator_pubkey || block_hash`. |
+| `registry`            | `&ValidatorRegistry`        | Trusted set: validator pubkey → stake (micro-ARX). Populated by the caller; on-chain sync is future work (§9). |
 
 ---
 
@@ -123,13 +190,24 @@ come in.
 Predicate:
 
 ```text
-amount <= L0_CAP_MICRO_ARX  AND  local_confirmations > 0
+amount <= L0_CAP_MICRO_ARX  AND
+  ∃ confirmation ∈ confirmations . confirmation.confirmer_pubkey ∈ registry
+                                    AND confirmation.block_hash == block_hash
+                                    AND confirmation.verify().is_ok()
 ```
 
 - `L0_CAP_MICRO_ARX` is `10_000_000` micro-ARX, i.e. **10 ARX**
   ([`arxia-core::constants`](../../crates/arxia-core/src/constants.rs)).
-- `L0` is reachable **fully offline**, so long as at least one local
-  peer (typically a BLE neighbor) has observed and confirmed the block.
+- A confirmation is a [`SignedConfirmation`](../../crates/arxia-finality/src/lib.rs)
+  carrying an Ed25519 signature from a registered node over
+  `FINALITY_CONFIRMATION_DOMAIN || confirmer_pubkey || block_hash`.
+  Confirmations from non-registered keys are silently filtered;
+  registered-but-bad signatures surface
+  `Err(FinalityError::SignatureInvalid)`.
+- `L0` is reachable **fully offline**, so long as at least one
+  registered local peer (typically a BLE neighbor in the
+  `ValidatorRegistry`) has observed, signed, and forwarded a
+  confirmation for the block.
 - `L0` is not safe against equivocation by the sender: a malicious
   sender may broadcast conflicting SENDs to two disjoint L0 audiences.
   That equivocation is detected at L1 when the audiences reconnect
@@ -171,30 +249,47 @@ is resolved by the higher tier.
 
 ### 4.4. `L2` — full validator consensus
 
-Predicate:
+Predicate (computed inside `assess_finality`, never accepted as a
+free `f64` from the caller):
 
 ```text
-validator_pct >= 0.67
+let accepted_stake = sum over distinct registered-validator pubkeys v
+                       where ∃ vote ∈ votes . vote.validator_pubkey == v
+                                            AND vote.block_hash == block_hash
+                                            AND vote.verify().is_ok()
+                     of registry.stake_of(v).
+let total_stake = registry.total_stake().
+predicate L2 ⇔ accepted_stake * 100 >= total_stake * 67
 ```
 
-`validator_pct` is the cumulative fraction of **total staked supply**
-whose ORV votes (§5) have been received, cryptographically verified,
-and deduplicated for this specific block hash.
+The threshold is `L2_QUORUM_FRACTION = 0.67`
+([`arxia-finality::lib`](../../crates/arxia-finality/src/lib.rs)),
+encoded as the integer-ratio check `accepted * 100 >= total * 67`
+to avoid f64 rounding at `u64::MAX` scale (saturating-mul also
+prevents overflow on adversarial stake values). It matches the
+classical Byzantine `2/3` bound — see also
+[`QUORUM_FRACTION`](../../crates/arxia-core/src/constants.rs)
+which is used by the consensus-layer `check_quorum` (§5.3).
 
-The `2/3` threshold is
-[`QUORUM_FRACTION = 2.0/3.0`](../../crates/arxia-core/src/constants.rs)
-and matches the classical Byzantine bound.
+A vote is a [`SignedValidatorVote`](../../crates/arxia-finality/src/lib.rs)
+carrying an Ed25519 signature from a registered validator over
+`FINALITY_VALIDATOR_VOTE_DOMAIN || validator_pubkey || block_hash`.
+Votes from non-registered validators are silently filtered;
+registered-but-bad signatures surface
+`Err(FinalityError::SignatureInvalid)`. Duplicate votes from the
+same validator count their stake **once** (the
+`HashSet<[u8;32]>` of seen `validator_pubkey`s prevents
+inflation by repeated submission).
 
 A block at `L2` is the strongest finality guarantee the protocol
 offers: it is safe against any colluding minority holding less than
-`1/3` of the total staked supply.
+`1/3` of the registered stake.
 
 ### 4.5. Priority
 
-`L2` short-circuits the entire cascade. A block that satisfies
-`validator_pct >= 0.67` reports `L2` regardless of amount or
-confirmations. This is pinned by
-`test_finality_l2_takes_priority`.
+`L2` short-circuits the entire cascade. A block that satisfies the
+`L2` predicate reports `L2` regardless of amount or confirmations.
+This is pinned by `test_assess_l2_takes_priority_over_l1_and_l0`.
 
 ---
 
@@ -372,6 +467,21 @@ layers.
 The following are planned extensions and are explicitly **not** part of
 the `v0.1.x` normative spec:
 
+- **On-chain ValidatorRegistry sync.** The `ValidatorRegistry` is
+  populated by the caller today. A future commit will sync it from
+  the consensus layer (representative stake + delegation accumulator)
+  so that `assess_finality` reads the registry directly from the
+  ledger state. Until then, the caller is responsible for sourcing
+  the trusted set from a CLI flag, configuration file, or peer-handshake
+  protocol.
+- **Consensus → finality vote bridge.** The consensus layer produces
+  [`VoteORV`](../../crates/arxia-consensus/src/vote.rs) records under
+  its own preimage layout. The finality layer consumes
+  [`SignedValidatorVote`](../../crates/arxia-finality/src/lib.rs)
+  records under the `arxia-finality-validator-vote-v1` domain. A
+  future commit will wire an adapter that re-signs (or co-signs) ORV
+  votes into the finality envelope so a single validator key drives
+  both subsystems consistently.
 - **Vector-clock-aware conflict resolution.** Wire Tier 2 of the
   cascade so that a causally-later block loses to a causally-earlier
   one regardless of hash order.
@@ -386,22 +496,29 @@ the `v0.1.x` normative spec:
 - **Global supply accumulator.** The per-account cap is enforced but
   no global supply invariant is checked at OPEN time. Adding a
   cumulative-supply guard is a tracked follow-up.
+- **Replay-window protection.** A signed vote / confirmation is
+  forever valid for its bound `block_hash`. Replay protection
+  beyond block-hash binding (timestamps, freshness windows) belongs
+  to a separate ingress-layer construct.
+- **Batched signature verification.** Each vote / confirmation is
+  verified individually. For high-throughput L2 paths, batched
+  Ed25519 verify (or BLS) would amortize the cost.
 
 ---
 
 ## 10. Constants index
 
-All values below are defined in
-[`arxia-core::constants`](../../crates/arxia-core/src/constants.rs).
-
-| Constant                          | Value                       | Used by |
-|-----------------------------------|-----------------------------|---------|
-| `L0_CAP_MICRO_ARX`                | `10_000_000` (10 ARX)       | `assess_finality` |
-| `QUORUM_FRACTION`                 | `2.0 / 3.0` (`0.6666…`)     | `assess_finality`, `check_quorum` |
-| `MIN_STAKE_FRACTION`              | `0.20` (20%)                | `check_quorum` |
-| `MIN_DELEGATION_FRACTION`         | `0.001` (0.1%)              | `collect_votes` |
-| `MAX_INITIAL_BALANCE_PER_ACCOUNT` | `100_000_000 * ONE_ARX`     | OPEN supply cap |
-| `ONE_ARX`                         | `1_000_000` micro-ARX       | unit conversion |
+| Constant                            | Value                       | Defined in | Used by |
+|-------------------------------------|-----------------------------|------------|---------|
+| `L0_CAP_MICRO_ARX`                  | `10_000_000` (10 ARX)       | `arxia-core::constants` | `assess_finality` |
+| `L2_QUORUM_FRACTION`                | `0.67`                      | `arxia-finality` | `assess_finality` (integer-ratio check `accepted * 100 ≥ total * 67`) |
+| `FINALITY_CONFIRMATION_DOMAIN`      | `b"arxia-finality-confirmation-v1"` (30 B) | `arxia-finality` | `SignedConfirmation::canonical_bytes` / `verify` |
+| `FINALITY_VALIDATOR_VOTE_DOMAIN`    | `b"arxia-finality-validator-vote-v1"` (32 B) | `arxia-finality` | `SignedValidatorVote::canonical_bytes` / `verify` |
+| `QUORUM_FRACTION`                   | `2.0 / 3.0` (`0.6666…`)     | `arxia-core::constants` | `check_quorum` (consensus-layer ORV; conceptually equivalent to `L2_QUORUM_FRACTION`, kept distinct because the two subsystems may diverge in calibration). |
+| `MIN_STAKE_FRACTION`                | `0.20` (20%)                | `arxia-core::constants` | `check_quorum` |
+| `MIN_DELEGATION_FRACTION`           | `0.001` (0.1%)              | `arxia-core::constants` | `collect_votes` |
+| `MAX_INITIAL_BALANCE_PER_ACCOUNT`   | `100_000_000 * ONE_ARX`     | `arxia-core::constants` | OPEN supply cap |
+| `ONE_ARX`                           | `1_000_000` micro-ARX       | `arxia-core::constants` | unit conversion |
 
 ---
 
@@ -409,24 +526,31 @@ All values below are defined in
 
 The following tests pin the normative behavior in this document.
 
-| Property                                               | Test                                                                | Location |
-|--------------------------------------------------------|---------------------------------------------------------------------|----------|
-| Tier ordering `Pending < L0 < L1 < L2`                 | `test_finality_ordering`                                            | `crates/arxia-finality/src/lib.rs` |
-| `L2` when `validator_pct >= 0.67`                      | `test_finality_l2`                                                  | `crates/arxia-finality/src/lib.rs` |
-| `L2` dominates the cascade                             | `test_finality_l2_takes_priority`                                   | `crates/arxia-finality/src/lib.rs` |
-| `L1` when `sync_result == Success`                     | `test_finality_l1`                                                  | `crates/arxia-finality/src/lib.rs` |
-| `L0` for small amount with ≥ 1 confirmation            | `test_finality_l0_small_amount`                                     | `crates/arxia-finality/src/lib.rs` |
-| `Pending` for large amount                             | `test_finality_pending_large_amount`                                | `crates/arxia-finality/src/lib.rs` |
-| `Pending` with zero confirmations                      | `test_finality_pending_no_confirmations`                            | `crates/arxia-finality/src/lib.rs` |
-| NonceRegistry conflict on same `(account, nonce)`      | `test_merge_detects_conflict_same_account_same_nonce_different_hash`| `crates/arxia-gossip/src/nonce_registry.rs` |
-| Gossip sync `Success` reporting                        | `test_sync_success`                                                 | `crates/arxia-gossip/src/nonce_registry.rs` |
-| Gossip sync `Mismatch` counting                        | `test_sync_mismatch_counts_distinct_hashes`                         | `crates/arxia-gossip/src/nonce_registry.rs` |
-| Partition-adversarial double-spend surfaces            | `test_adversarial_double_spend_two_partitions`                      | `crates/arxia-gossip/src/nonce_registry.rs` |
-| Stake-weighted conflict resolution                     | `test_resolve_conflict_stake_weighted`                              | `crates/arxia-consensus/src/conflict.rs` |
-| Reconciler preserves non-negative balance              | `test_reconcile_never_goes_negative_on_double_spend`                | `crates/arxia-crdt/src/reconciliation.rs` |
-| Reconciler picks deterministic hash-tiebreaker winner  | `test_reconcile_deterministic_winner_by_hash`                       | `crates/arxia-crdt/src/reconciliation.rs` |
-| Double-receive of the same SEND is rejected            | `test_receive_rejects_duplicate_send`                               | `crates/arxia-lattice/src/chain.rs` |
-| RECEIVE replay cannot mint infinite balance            | `test_receive_replay_does_not_mint_infinite`                        | `crates/arxia-lattice/src/chain.rs` |
+| Property                                                          | Test                                                                | Location |
+|-------------------------------------------------------------------|---------------------------------------------------------------------|----------|
+| Tier ordering `Pending < L0 < L1 < L2`                            | `test_finality_ordering`                                            | `crates/arxia-finality/src/lib.rs` |
+| `L2_QUORUM_FRACTION = 0.67` constant pinned                       | `test_l2_quorum_fraction_constant_pinned`                           | `crates/arxia-finality/src/lib.rs` |
+| `L2` when registered-validator stake ≥ 67 %                       | `test_assess_l2_when_quorum_stake_voted`                            | `crates/arxia-finality/src/lib.rs` |
+| `L2` dominates the cascade                                        | `test_assess_l2_takes_priority_over_l1_and_l0`                      | `crates/arxia-finality/src/lib.rs` |
+| `L2` rejected when validator not in registry (CRIT-007 core)      | `test_assess_l2_rejected_when_validator_not_in_registry`            | `crates/arxia-finality/src/lib.rs` |
+| `L2` rejected on registered-but-bad signature (loud `Err`)        | `test_assess_l2_rejected_with_zero_signature_from_registered_validator` | `crates/arxia-finality/src/lib.rs` |
+| `L1` when `sync_result == Success`                                | `test_assess_l1_when_sync_success`                                  | `crates/arxia-finality/src/lib.rs` |
+| `L0` with one valid registered confirmation                       | `test_assess_l0_with_one_valid_confirmation`                        | `crates/arxia-finality/src/lib.rs` |
+| `L0` rejected when confirmer not in registry (CRIT-008 core)      | `test_assess_l0_rejected_when_confirmer_not_in_registry`            | `crates/arxia-finality/src/lib.rs` |
+| `L0` rejected on registered-but-bad signature (loud `Err`)        | `test_assess_l0_rejected_with_zero_signature_from_registered_confirmer` | `crates/arxia-finality/src/lib.rs` |
+| `Pending` baseline (no inputs)                                    | `test_assess_pending_when_amount_high_and_no_inputs`                | `crates/arxia-finality/src/lib.rs` |
+| Validator stake counted at most once per call                     | `test_assess_dedup_double_voting_validator`                         | `crates/arxia-finality/src/lib.rs` |
+| Below-quorum stake stays Pending                                  | `test_assess_l2_below_quorum_does_not_promote`                      | `crates/arxia-finality/src/lib.rs` |
+| Cross-domain replay (confirmation sig as vote) rejected           | `test_domain_separation_prevents_confirmation_replayed_as_vote`     | `crates/arxia-finality/src/lib.rs` |
+| NonceRegistry conflict on same `(account, nonce)`                 | `test_merge_detects_conflict_same_account_same_nonce_different_hash`| `crates/arxia-gossip/src/nonce_registry.rs` |
+| Gossip sync `Success` reporting                                   | `test_sync_success`                                                 | `crates/arxia-gossip/src/nonce_registry.rs` |
+| Gossip sync `Mismatch` counting                                   | `test_sync_mismatch_counts_distinct_hashes`                         | `crates/arxia-gossip/src/nonce_registry.rs` |
+| Partition-adversarial double-spend surfaces                       | `test_adversarial_double_spend_two_partitions`                      | `crates/arxia-gossip/src/nonce_registry.rs` |
+| Stake-weighted conflict resolution                                | `test_resolve_conflict_stake_weighted`                              | `crates/arxia-consensus/src/conflict.rs` |
+| Reconciler preserves non-negative balance                         | `test_reconcile_never_goes_negative_on_double_spend`                | `crates/arxia-crdt/src/reconciliation.rs` |
+| Reconciler picks deterministic hash-tiebreaker winner             | `test_reconcile_deterministic_winner_by_hash`                       | `crates/arxia-crdt/src/reconciliation.rs` |
+| Double-receive of the same SEND is rejected                       | `test_receive_rejects_duplicate_send`                               | `crates/arxia-lattice/src/chain.rs` |
+| RECEIVE replay cannot mint infinite balance                       | `test_receive_replay_does_not_mint_infinite`                        | `crates/arxia-lattice/src/chain.rs` |
 
 ---
 
@@ -435,3 +559,4 @@ The following tests pin the normative behavior in this document.
 | Version | Change |
 |---------|--------|
 | `0.1.0` | Initial 4-tier model (Pending / L0 / L1 / L2); ORV quorum `2/3 stake AND 20% supply`; stake/hash conflict cascade; CRDT reconciliation with non-negative balance invariant. |
+| `0.2.0` (Wave 3, PR #47) | `assess_finality` switched to authenticated inputs to close audit findings **CRIT-007** (caller-supplied `validator_pct`) and **CRIT-008** (caller-supplied `local_confirmations`). New types: `SignedConfirmation`, `SignedValidatorVote`, `ValidatorRegistry`, `FinalityError`. Two distinct domain prefixes (`arxia-finality-confirmation-v1`, `arxia-finality-validator-vote-v1`) prevent cross-protocol replay. `L2_QUORUM_FRACTION = 0.67` is now an integer-ratio check `accepted * 100 ≥ total * 67` (no f64 rounding at u64::MAX scale). Return type is `Result<FinalityLevel, FinalityError>`. |
