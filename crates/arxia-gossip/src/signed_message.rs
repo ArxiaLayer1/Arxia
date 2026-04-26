@@ -630,4 +630,94 @@ mod tests {
             err
         );
     }
+
+    // --- HIGH-009: oversized NonceSyncResponse rejected before crypto ---
+
+    #[test]
+    fn test_verify_rejects_oversized_nonce_sync_response_with_message_invalid() {
+        // An attacker sends a NonceSyncResponse whose `entries` count
+        // exceeds MAX_NONCE_SYNC_RESPONSE_ENTRIES. verify() must reject
+        // with MessageInvalid (cheap structural error) and NOT
+        // SignatureInvalid — confirming the structural check runs
+        // BEFORE any crypto work.
+        use crate::message::{MessageError, MAX_NONCE_SYNC_RESPONSE_ENTRIES};
+        let oversized = GossipMessage::NonceSyncResponse {
+            entries: vec![([0u8; 32], 0, [0u8; 32]); MAX_NONCE_SYNC_RESPONSE_ENTRIES + 1],
+        };
+        // Build a structurally-correct envelope: real keypair + correct
+        // signature on the oversized canonical bytes.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let canonical = SignedGossipMessage::canonical_bytes(&oversized, &pk);
+        let sig = sign(&sk, &canonical);
+        let s = SignedGossipMessage {
+            message: oversized,
+            sender_pubkey: pk,
+            signature: sig.to_vec(),
+        };
+
+        let err = s.verify().unwrap_err();
+        match err {
+            SignedGossipMessageError::MessageInvalid(MessageError::NonceSyncResponseTooLarge {
+                count,
+                max,
+            }) => {
+                assert_eq!(count, MAX_NONCE_SYNC_RESPONSE_ENTRIES + 1);
+                assert_eq!(max, MAX_NONCE_SYNC_RESPONSE_ENTRIES);
+            }
+            other => panic!(
+                "expected MessageInvalid(NonceSyncResponseTooLarge), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_verify_at_max_nonce_sync_response_entries_passes() {
+        // Boundary case: exactly MAX_NONCE_SYNC_RESPONSE_ENTRIES is
+        // accepted (cap is strict-greater-than).
+        use crate::message::MAX_NONCE_SYNC_RESPONSE_ENTRIES;
+        let max_size = GossipMessage::NonceSyncResponse {
+            entries: vec![([0u8; 32], 0, [0u8; 32]); MAX_NONCE_SYNC_RESPONSE_ENTRIES],
+        };
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let canonical = SignedGossipMessage::canonical_bytes(&max_size, &pk);
+        let sig = sign(&sk, &canonical);
+        let s = SignedGossipMessage {
+            message: max_size,
+            sender_pubkey: pk,
+            signature: sig.to_vec(),
+        };
+        assert!(
+            s.verify().is_ok(),
+            "envelope at exactly MAX_NONCE_SYNC_RESPONSE_ENTRIES must verify"
+        );
+    }
+
+    #[test]
+    fn test_verify_oversized_nonce_sync_response_short_circuits_before_crypto() {
+        // Same as the rejection test, but with an INTENTIONALLY BAD
+        // signature. The size check fires first regardless.
+        use crate::message::{MessageError, MAX_NONCE_SYNC_RESPONSE_ENTRIES};
+        let oversized = GossipMessage::NonceSyncResponse {
+            entries: vec![([0u8; 32], 0, [0u8; 32]); MAX_NONCE_SYNC_RESPONSE_ENTRIES + 1],
+        };
+        let s = SignedGossipMessage {
+            message: oversized,
+            sender_pubkey: [0xAAu8; 32], // arbitrary; would fail crypto
+            signature: vec![0u8; 64],    // zero sig; would fail crypto
+        };
+        let err = s.verify().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SignedGossipMessageError::MessageInvalid(
+                    MessageError::NonceSyncResponseTooLarge { .. }
+                )
+            ),
+            "size check must run before crypto; got {:?}",
+            err
+        );
+    }
 }
