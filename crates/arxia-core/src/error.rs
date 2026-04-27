@@ -163,4 +163,15 @@ pub enum ArxiaError {
     /// Refused at `send()` time before any state mutation.
     #[error("send rejected: destination equals sender (self-send not allowed)")]
     SelfSendNotAllowed,
+
+    /// A vote was received whose `block_hash` is not in the local
+    /// block store. HIGH-006 defence: votes pointing at phantom blocks
+    /// would otherwise allow stake to be "spent" on nothing,
+    /// poisoning `resolve_conflict_orv` weights. Returned by
+    /// `arxia_consensus::vote::verify_vote_known` on ingress.
+    #[error("vote rejected: block hash {block_hash} not in local block store")]
+    UnknownVoteTarget {
+        /// Hex-encoded block hash that the vote targets.
+        block_hash: String,
+    },
 }

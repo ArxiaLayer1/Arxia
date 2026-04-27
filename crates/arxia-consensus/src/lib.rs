@@ -12,4 +12,4 @@ pub mod vote;
 pub use conflict::{detect_double_spend, resolve_conflict_orv, BlockCandidate};
 pub use orv::collect_votes;
 pub use quorum::check_quorum;
-pub use vote::{cast_vote, compute_vote_hash, verify_vote, VoteORV};
+pub use vote::{cast_vote, compute_vote_hash, verify_vote, verify_vote_known, VoteORV};
