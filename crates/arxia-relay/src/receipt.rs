@@ -9,6 +9,22 @@
 //! via [`crate::scoring::RelayScore::record_success`]) before trusting
 //! any field of the receipt for a state change — this is the core
 //! mitigation for CRIT-004 (forged-receipt reputation inflation).
+//!
+//! # Hop-count bound (HIGH-014, commit 036)
+//!
+//! `hop_count` is capped at [`MAX_HOPS_PER_RECEIPT`]. A receipt whose
+//! `hop_count` exceeds the cap is rejected with
+//! [`RelayReceiptError::HopCountTooHigh`] BEFORE any Ed25519 work —
+//! cheap rejection of attacker-inflated values. The audit (HIGH-014):
+//!
+//! > Attack: relay claims `hop_count = 255` to inflate scoring or to
+//! > confuse scoring logic that expects a small range.
+//! > Impact: score manipulation; distance/range stats corrupt.
+//!
+//! The cap is set at 16, which is well above realistic mesh-relay
+//! depths (typical LoRa mesh: 2-5 hops; pathological: ~10) but well
+//! below the `u8::MAX` worst case. A future protocol revision can
+//! raise it via a deprecation cycle.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +38,15 @@ use arxia_core::ArxiaError;
 /// prevents a signature minted over the same raw bytes in a different
 /// protocol context (e.g. a block hash) from being replayed here.
 pub const RELAY_RECEIPT_DOMAIN: &[u8] = b"arxia-relay-receipt-v1";
+
+/// Maximum number of hops a receipt may declare. HIGH-014 cap.
+///
+/// Receipts with `hop_count > MAX_HOPS_PER_RECEIPT` are rejected by
+/// [`RelayReceipt::verify`] BEFORE any Ed25519 work. Set well above
+/// realistic mesh depths (LoRa mesh typically 2-5 hops) and well
+/// below `u8::MAX` to leave headroom for hardened scoring math
+/// without admitting attacker-inflated values.
+pub const MAX_HOPS_PER_RECEIPT: u8 = 16;
 
 /// Errors returned by [`RelayReceipt::verify`] and the scoring calls
 /// that wrap it.
@@ -53,6 +78,16 @@ pub enum RelayReceiptError {
     /// but same-message receipt — is replayed. Closes CRIT-005
     /// (duplicate-receipt reputation inflation).
     DuplicateReceipt,
+    /// `hop_count` exceeds [`MAX_HOPS_PER_RECEIPT`]. HIGH-014: a
+    /// relay claiming `hop_count = 255` would inflate scoring or
+    /// confuse range-bounded stats. Rejected at ingress before any
+    /// Ed25519 work.
+    HopCountTooHigh {
+        /// The hop_count declared in the receipt.
+        got: u8,
+        /// The protocol cap, [`MAX_HOPS_PER_RECEIPT`].
+        max: u8,
+    },
 }
 
 impl std::fmt::Display for RelayReceiptError {
@@ -72,6 +107,9 @@ impl std::fmt::Display for RelayReceiptError {
             Self::WrongRelayId => f.write_str("receipt relay_id does not match the scored relay"),
             Self::DuplicateReceipt => {
                 f.write_str("receipt with this message_hash has already been credited")
+            }
+            Self::HopCountTooHigh { got, max } => {
+                write!(f, "hop_count {got} exceeds protocol cap {max}")
             }
         }
     }
@@ -95,7 +133,9 @@ pub struct RelayReceipt {
     /// produced by [`RelayReceipt::canonical_message`]. MUST be exactly
     /// 64 bytes when the receipt is considered valid.
     pub signature: Vec<u8>,
-    /// Number of hops this message has traversed.
+    /// Number of hops this message has traversed. MUST be at most
+    /// [`MAX_HOPS_PER_RECEIPT`]; values above the cap are rejected
+    /// by [`RelayReceipt::verify`] (HIGH-014).
     pub hop_count: u8,
 }
 
@@ -131,10 +171,26 @@ impl RelayReceipt {
     /// Verify the Ed25519 signature on this receipt against the pubkey
     /// encoded in [`relay_id`](Self::relay_id).
     ///
+    /// Order of checks:
+    /// 1. **`hop_count` cap** ([`MAX_HOPS_PER_RECEIPT`], HIGH-014) —
+    ///    cheap rejection of attacker-inflated values.
+    /// 2. Canonical-message construction (hex decode of `relay_id`
+    ///    and `message_hash`).
+    /// 3. Signature length check.
+    /// 4. Ed25519 verify.
+    ///
     /// Must be called before any state change (scoring, payout,
     /// slashing-waiver) trusts the receipt. See the CRIT-004 regression
     /// guards in `crate::scoring::tests` (compiled under `#[cfg(test)]`).
     pub fn verify(&self) -> Result<(), RelayReceiptError> {
+        // HIGH-014 cap: cheapest possible rejection. Fires before any
+        // hex decode or Ed25519 work.
+        if self.hop_count > MAX_HOPS_PER_RECEIPT {
+            return Err(RelayReceiptError::HopCountTooHigh {
+                got: self.hop_count,
+                max: MAX_HOPS_PER_RECEIPT,
+            });
+        }
         let msg = self.canonical_message()?;
         let pk = decode_hex_32(&self.relay_id).map_err(|_| RelayReceiptError::InvalidRelayId)?;
         if self.signature.len() != 64 {
@@ -326,5 +382,98 @@ mod tests {
             hop_count: 3,
         };
         assert_eq!(r.verify(), Err(RelayReceiptError::SignatureInvalid));
+    }
+
+    // ============================================================
+    // HIGH-014 (commit 036) — hop_count cap.
+    // Receipts with `hop_count > MAX_HOPS_PER_RECEIPT` are rejected
+    // BEFORE any Ed25519 work.
+    // ============================================================
+
+    #[test]
+    fn test_max_hops_per_receipt_constant() {
+        // Pin the cap. If the protocol revisits this value, the test
+        // becomes a deliberate gate: changing 16 here forces a
+        // conscious update.
+        assert_eq!(MAX_HOPS_PER_RECEIPT, 16);
+    }
+
+    #[test]
+    fn test_verify_rejects_hop_count_above_max() {
+        // PRIMARY HIGH-014 PIN: hop_count = 255 (the audit's exact
+        // attacker shape) must reject with HopCountTooHigh, NOT
+        // succeed and NOT degrade to SignatureInvalid.
+        let (r, _) = signed_receipt(1, 255);
+        let err = r.verify().expect_err("hop_count=255 must be rejected");
+        match err {
+            RelayReceiptError::HopCountTooHigh { got, max } => {
+                assert_eq!(got, 255);
+                assert_eq!(max, MAX_HOPS_PER_RECEIPT);
+            }
+            other => panic!("expected HopCountTooHigh, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_rejects_hop_count_just_above_max() {
+        // Boundary: hop_count = MAX + 1 must reject. Pins the
+        // off-by-one edge.
+        let (r, _) = signed_receipt(1, MAX_HOPS_PER_RECEIPT + 1);
+        let err = r.verify().expect_err("hop_count = MAX+1 must be rejected");
+        assert!(matches!(
+            err,
+            RelayReceiptError::HopCountTooHigh { got, max }
+                if got == MAX_HOPS_PER_RECEIPT + 1 && max == MAX_HOPS_PER_RECEIPT
+        ));
+    }
+
+    #[test]
+    fn test_verify_accepts_hop_count_at_max() {
+        // Boundary: hop_count = MAX is accepted (signature must be
+        // valid for that hop_count). Pins that the cap is
+        // INCLUSIVE — the cap value itself is allowed.
+        let (r, _) = signed_receipt(1, MAX_HOPS_PER_RECEIPT);
+        assert!(
+            r.verify().is_ok(),
+            "hop_count = MAX must be accepted with valid signature"
+        );
+    }
+
+    #[test]
+    fn test_verify_accepts_hop_count_zero() {
+        // Boundary: hop_count = 0 is accepted (e.g. originator's
+        // receipt before any forwarding). Pins that there's no
+        // implicit lower bound on hop_count.
+        let (r, _) = signed_receipt(1, 0);
+        assert!(r.verify().is_ok(), "hop_count = 0 must be accepted");
+    }
+
+    #[test]
+    fn test_verify_hop_count_check_fires_before_signature_verify() {
+        // ORDER PIN: even if the signature is structurally invalid,
+        // the hop_count cap must fire first (cheap rejection). This
+        // ensures an attacker cannot probe Ed25519 verify timing
+        // with hop_count = 255 + garbage signature.
+        let (mut r, _) = signed_receipt(1, 255);
+        r.signature = vec![0u8; 64]; // invalid signature
+        let err = r.verify().expect_err("must reject");
+        match err {
+            RelayReceiptError::HopCountTooHigh { .. } => {} // expected
+            RelayReceiptError::SignatureInvalid => {
+                panic!("hop_count cap must fire before signature verify")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_hop_count_too_high_display_format() {
+        let err = RelayReceiptError::HopCountTooHigh {
+            got: 200,
+            max: MAX_HOPS_PER_RECEIPT,
+        };
+        let s = format!("{err}");
+        assert!(s.contains("200"));
+        assert!(s.contains(&MAX_HOPS_PER_RECEIPT.to_string()));
     }
 }
