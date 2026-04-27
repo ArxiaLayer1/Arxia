@@ -18,7 +18,7 @@ pub mod ed25519;
 pub mod slip39;
 
 pub use blake3_hash::{hash_blake3, hash_blake3_bytes};
-pub use ed25519::{generate_keypair, sign, verify};
+pub use ed25519::{generate_keypair, sign, validate_pubkey_strict, verify};
 
 /// Marker error returned by crypto functions that are deliberately
 /// left un-implemented until a future milestone.

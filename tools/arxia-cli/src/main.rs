@@ -85,8 +85,17 @@ fn write_secret_keypair(path: &Path, public_hex: &str, private_hex: &str) -> std
 
 fn cmd_did() {
     let (_, verifying_key) = arxia_crypto::generate_keypair();
-    let did = arxia_did::ArxiaDid::from_public_key(&verifying_key.to_bytes());
-    println!("DID: {}", did);
+    // `generate_keypair` always emits a valid Ed25519 verifying key,
+    // so `from_public_key` always returns `Ok` here in practice. The
+    // match arm is kept so the binary never panics on a future dalek
+    // change that loosens generate_keypair's invariant.
+    match arxia_did::ArxiaDid::from_public_key(&verifying_key.to_bytes()) {
+        Ok(did) => println!("DID: {}", did),
+        Err(e) => {
+            eprintln!("DID generation failed: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn print_help() {

@@ -9,7 +9,11 @@ fn main() {
 
     for i in 1..=3 {
         let (_, vk) = generate_keypair();
-        let did = ArxiaDid::from_public_key(&vk.to_bytes());
+        // generate_keypair always emits a valid Ed25519 pubkey, so
+        // from_public_key returns Ok in practice. Unwrap is safe and
+        // expressive here (a panic would indicate a dalek regression).
+        let did = ArxiaDid::from_public_key(&vk.to_bytes())
+            .expect("generate_keypair output must validate");
         println!("Identity {}: {}", i, did);
     }
 
