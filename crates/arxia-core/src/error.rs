@@ -174,4 +174,22 @@ pub enum ArxiaError {
         /// Hex-encoded block hash that the vote targets.
         block_hash: String,
     },
+
+    /// `resolve_conflict_orv` was called with a block whose
+    /// `block_type` is not eligible for ORV conflict resolution.
+    /// HIGH-025 defence: the cascade is the *monetary* / chain-
+    /// continuity adjudicator; conflating a `Revoke` (DID credential
+    /// revocation) with a `Send` would let a non-monetary block win
+    /// an economic conflict and be applied by the reconciliation
+    /// pipeline as if it had balance implications. Only
+    /// `{Open, Send, Receive}` are accepted on this path.
+    #[error(
+        "ORV conflict resolution rejected: block {block_hash} has ineligible type {block_type}"
+    )]
+    IneligibleConflictBlockType {
+        /// Hex-encoded block hash.
+        block_hash: String,
+        /// Debug-formatted block type tag (e.g. `"Revoke"`).
+        block_type: String,
+    },
 }
