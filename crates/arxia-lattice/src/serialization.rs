@@ -2,12 +2,56 @@
 //!
 //! Layout: [1B type][32B account][32B prev_hash][8B balance][8B nonce]
 //! [8B timestamp][8B amount/initial][32B dest_or_source][64B signature]
+//!
+//! # Loud failure on malformed hex (HIGH-004)
+//!
+//! Pre-fix, [`to_compact_bytes`] silently substituted `[0u8; 32]` for
+//! any hex-decode failure on the `account` / `previous` / `destination`
+//! / `source_hash` fields. An upstream bug producing a malformed hex
+//! string would turn into 32 zero bytes on the wire — the receiver
+//! would deserialize it, recompute the hash from the same 32 zeros,
+//! and the block would "verify" but represent a different semantic
+//! object than what was intended. Silent data corruption.
+//!
+//! Post-fix (commit 032), [`to_compact_bytes`] returns
+//! `Result<Vec<u8>, ArxiaError>` and propagates every `hex::decode`
+//! failure as `ArxiaError::HexDecode` (or the structurally-equivalent
+//! length error). Callers MUST handle the `Err` arm at compile time.
 
 use crate::block::{Block, BlockType};
 use arxia_core::{ArxiaError, COMPACT_BLOCK_SIZE};
 
+/// Decode a hex string into a fixed-size 32-byte array. Loud failure
+/// on bad input: `Err(ArxiaError::HexDecode)` for non-hex,
+/// `Err(ArxiaError::InvalidKey)` for wrong length.
+fn hex_decode_32(field_name: &str, s: &str) -> Result<[u8; 32], ArxiaError> {
+    let v = hex::decode(s).map_err(ArxiaError::HexDecode)?;
+    let len = v.len();
+    v.as_slice().try_into().map_err(|_| {
+        ArxiaError::InvalidKey(format!(
+            "{} must be 64 hex chars (32 bytes), got {} bytes",
+            field_name, len
+        ))
+    })
+}
+
 /// Serialize a block to compact binary format (193 bytes).
-pub fn to_compact_bytes(block: &Block) -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns `Err(ArxiaError::HexDecode)` if any hex field
+/// (`account`, `previous`, `destination`, `source_hash`,
+/// `credential_hash`) is not valid hex.
+///
+/// Returns `Err(ArxiaError::InvalidKey)` if any hex field decodes
+/// to other than exactly 32 bytes.
+///
+/// HIGH-004 (commit 032): this function used to silently substitute
+/// `[0u8; 32]` on any hex-decode failure, turning a structural error
+/// (malformed upstream input) into wire-level data corruption that
+/// downstream `verify_block` could not detect. The current
+/// implementation surfaces every such failure to the caller.
+pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
     let mut buf = Vec::with_capacity(COMPACT_BLOCK_SIZE);
     match &block.block_type {
         BlockType::Open { .. } => buf.push(0x00),
@@ -15,17 +59,25 @@ pub fn to_compact_bytes(block: &Block) -> Vec<u8> {
         BlockType::Receive { .. } => buf.push(0x02),
         BlockType::Revoke { .. } => buf.push(0x03),
     }
-    let account_bytes = hex::decode(&block.account).unwrap_or_else(|_| vec![0u8; 32]);
-    buf.extend_from_slice(&account_bytes[..32]);
+
+    let account_bytes = hex_decode_32("account", &block.account)?;
+    buf.extend_from_slice(&account_bytes);
+
     if block.previous.is_empty() {
+        // Genesis block: previous is conventionally the empty string,
+        // serialized as 32 zero bytes. This is NOT a hex-decode
+        // fallback — empty-string previous is the documented genesis
+        // sentinel.
         buf.extend_from_slice(&[0u8; 32]);
     } else {
-        let prev = hex::decode(&block.previous).unwrap_or_else(|_| vec![0u8; 32]);
-        buf.extend_from_slice(&prev[..32]);
+        let prev = hex_decode_32("previous", &block.previous)?;
+        buf.extend_from_slice(&prev);
     }
+
     buf.extend_from_slice(&block.balance.to_be_bytes());
     buf.extend_from_slice(&block.nonce.to_be_bytes());
     buf.extend_from_slice(&block.timestamp.to_be_bytes());
+
     match &block.block_type {
         BlockType::Open { initial_balance } => {
             buf.extend_from_slice(&initial_balance.to_be_bytes())
@@ -33,27 +85,35 @@ pub fn to_compact_bytes(block: &Block) -> Vec<u8> {
         BlockType::Send { amount, .. } => buf.extend_from_slice(&amount.to_be_bytes()),
         _ => buf.extend_from_slice(&0u64.to_be_bytes()),
     }
+
     match &block.block_type {
         BlockType::Send { destination, .. } => {
-            let d = hex::decode(destination).unwrap_or_else(|_| vec![0u8; 32]);
-            buf.extend_from_slice(&d[..32]);
+            let d = hex_decode_32("destination", destination)?;
+            buf.extend_from_slice(&d);
         }
         BlockType::Receive { source_hash } => {
-            let s = hex::decode(source_hash).unwrap_or_else(|_| vec![0u8; 32]);
-            buf.extend_from_slice(&s[..32]);
+            let s = hex_decode_32("source_hash", source_hash)?;
+            buf.extend_from_slice(&s);
         }
         BlockType::Revoke { credential_hash } => {
-            let r = hex::decode(credential_hash).unwrap_or_else(|_| vec![0u8; 32]);
-            buf.extend_from_slice(&r[..32]);
+            let r = hex_decode_32("credential_hash", credential_hash)?;
+            buf.extend_from_slice(&r);
         }
         BlockType::Open { .. } => buf.extend_from_slice(&[0u8; 32]),
     }
+
     if block.signature.len() == 64 {
         buf.extend_from_slice(&block.signature);
     } else {
+        // Signature length mismatch is a separate concern from hex
+        // decoding (the field is a Vec<u8>, not a hex string). The
+        // current behavior preserves the pre-fix semantics: pad with
+        // zeros so the wire format is still 193 bytes. A
+        // missing/wrong-length signature is caught by `verify_block`
+        // downstream.
         buf.extend_from_slice(&[0u8; 64]);
     }
-    buf
+    Ok(buf)
 }
 
 /// Deserialize a block from compact binary format (193 bytes).
@@ -122,7 +182,7 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
         let block = chain.open(1_000_000, &mut vc).unwrap();
-        let bytes = to_compact_bytes(&block);
+        let bytes = to_compact_bytes(&block).unwrap();
         assert_eq!(bytes.len(), COMPACT_BLOCK_SIZE);
         let restored = from_compact_bytes(&bytes).unwrap();
         assert_eq!(restored.balance, block.balance);
@@ -135,7 +195,7 @@ mod tests {
         let mut chain = AccountChain::new();
         chain.open(1_000_000, &mut vc).unwrap();
         let send = chain.send(&"ab".repeat(32), 500_000, &mut vc).unwrap();
-        let bytes = to_compact_bytes(&send);
+        let bytes = to_compact_bytes(&send).unwrap();
         assert_eq!(bytes.len(), COMPACT_BLOCK_SIZE);
         let restored = from_compact_bytes(&bytes).unwrap();
         assert_eq!(restored.balance, send.balance);
@@ -147,7 +207,7 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
         let block = chain.open(42, &mut vc).unwrap();
-        assert_eq!(to_compact_bytes(&block).len(), 193);
+        assert_eq!(to_compact_bytes(&block).unwrap().len(), 193);
     }
 
     #[test]
@@ -178,7 +238,7 @@ mod tests {
         let block = chain.open(1_000_000, &mut vc).unwrap();
         let original_hash = block.hash.clone();
         let original_ts = block.timestamp;
-        let bytes = to_compact_bytes(&block);
+        let bytes = to_compact_bytes(&block).unwrap();
         let restored = from_compact_bytes(&bytes).unwrap();
         assert_eq!(restored.hash, original_hash);
         assert_eq!(restored.timestamp, original_ts);
@@ -192,7 +252,7 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
         let block = chain.open(1_000_000, &mut vc).unwrap();
-        let bytes = to_compact_bytes(&block);
+        let bytes = to_compact_bytes(&block).unwrap();
         let h1 = from_compact_bytes(&bytes).unwrap().hash;
         std::thread::sleep(std::time::Duration::from_millis(10));
         let h2 = from_compact_bytes(&bytes).unwrap().hash;
@@ -211,7 +271,7 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
         let block = chain.open(1_000_000, &mut vc).unwrap();
-        let mut bytes = to_compact_bytes(&block);
+        let mut bytes = to_compact_bytes(&block).unwrap();
         // Bytes 81..89 are the timestamp. Flip the low-order byte.
         bytes[88] ^= 0xFF;
         let tampered = from_compact_bytes(&bytes).unwrap();
@@ -228,7 +288,7 @@ mod tests {
         let mut vc = VectorClock::new();
         let mut chain = AccountChain::new();
         let block_a = chain.open(1_000_000, &mut vc).unwrap();
-        let wire = to_compact_bytes(&block_a);
+        let wire = to_compact_bytes(&block_a).unwrap();
         // "Node B" deserializes fresh
         let block_b = from_compact_bytes(&wire).unwrap();
         assert_eq!(block_a.hash, block_b.hash);
@@ -253,5 +313,132 @@ mod tests {
             block.timestamp,
         );
         assert_eq!(recomputed, block.hash);
+    }
+
+    // ========================================================================
+    // Adversarial tests for HIGH-004 (loud failure on malformed hex)
+    //
+    // `to_compact_bytes` must propagate every hex-decode failure as
+    // `ArxiaError::HexDecode` (or `InvalidKey` for wrong length),
+    // never silently substitute `[0u8; 32]`.
+    // ========================================================================
+
+    /// Build a base OPEN block. Returns a valid block we can mutate.
+    fn base_open_block() -> Block {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        chain.open(1_000_000, &mut vc).unwrap()
+    }
+
+    #[test]
+    fn test_to_compact_bytes_rejects_malformed_hex_account() {
+        // `account` field with non-hex characters. The pre-fix code
+        // silently used [0u8; 32]; the post-fix code returns Err.
+        let mut block = base_open_block();
+        block.account = "GG".repeat(32); // 64 chars, but G is not hex
+        let result = to_compact_bytes(&block);
+        assert!(
+            matches!(result, Err(ArxiaError::HexDecode(_))),
+            "expected HexDecode, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_to_compact_bytes_rejects_wrong_length_hex_account() {
+        // `account` field is valid hex but only 16 chars (8 bytes).
+        // Pre-fix code would `&account_bytes[..32]` panic; post-fix
+        // returns InvalidKey.
+        let mut block = base_open_block();
+        block.account = "ab".repeat(8); // 16 chars = 8 bytes
+        let result = to_compact_bytes(&block);
+        assert!(
+            matches!(result, Err(ArxiaError::InvalidKey(_))),
+            "expected InvalidKey, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_to_compact_bytes_rejects_malformed_hex_previous() {
+        // `previous` non-empty + non-hex must surface as Err.
+        let mut block = base_open_block();
+        block.previous = "ZZ".repeat(32); // non-hex (Z is not hex)
+        let result = to_compact_bytes(&block);
+        assert!(
+            matches!(result, Err(ArxiaError::HexDecode(_))),
+            "expected HexDecode, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_to_compact_bytes_accepts_empty_previous_as_genesis_sentinel() {
+        // Empty string `previous` is the genesis convention — NOT a
+        // hex-decode error. Must succeed.
+        let block = base_open_block();
+        assert_eq!(block.previous, "");
+        let bytes = to_compact_bytes(&block).expect("genesis serializes ok");
+        assert_eq!(bytes.len(), COMPACT_BLOCK_SIZE);
+        // Bytes 33..65 are the previous-hash slot, all zeros for genesis.
+        assert!(bytes[33..65].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_to_compact_bytes_rejects_malformed_hex_destination() {
+        // SEND.destination with non-hex must surface as Err. We have
+        // to construct the SEND manually because AccountChain::send
+        // also rejects non-hex destinations downstream — but we
+        // explicitly want to test the serialization layer's
+        // independent guard.
+        let mut block = base_open_block();
+        // Force the variant to Send with a non-hex destination.
+        block.block_type = BlockType::Send {
+            destination: "GG".repeat(32),
+            amount: 100,
+        };
+        let result = to_compact_bytes(&block);
+        assert!(
+            matches!(result, Err(ArxiaError::HexDecode(_))),
+            "expected HexDecode for malformed destination, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_to_compact_bytes_rejects_malformed_hex_source_hash() {
+        // RECEIVE.source_hash with non-hex must surface as Err.
+        let mut block = base_open_block();
+        block.block_type = BlockType::Receive {
+            source_hash: "ZZ".repeat(32),
+        };
+        let result = to_compact_bytes(&block);
+        assert!(
+            matches!(result, Err(ArxiaError::HexDecode(_))),
+            "expected HexDecode for malformed source_hash, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_to_compact_bytes_rejects_malformed_hex_credential_hash() {
+        // REVOKE.credential_hash with non-hex must surface as Err.
+        let mut block = base_open_block();
+        block.block_type = BlockType::Revoke {
+            credential_hash: "QQ".repeat(32),
+        };
+        let result = to_compact_bytes(&block);
+        assert!(
+            matches!(result, Err(ArxiaError::HexDecode(_))),
+            "expected HexDecode for malformed credential_hash, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_to_compact_bytes_succeeds_on_valid_block() {
+        // Regression guard: legitimate blocks still serialize cleanly.
+        let block = base_open_block();
+        assert!(to_compact_bytes(&block).is_ok());
     }
 }
