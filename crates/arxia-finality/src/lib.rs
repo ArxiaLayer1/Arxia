@@ -38,11 +38,40 @@
 //! confirmation IS from a registered key but its signature does not
 //! verify (loud failure — a registered key signing wrong is
 //! actionable evidence of misbehavior).
+//!
+//! # Latched monotonic finality (HIGH-017, commit 042)
+//!
+//! Finality is supposed to be monotonic: once a block reaches L1,
+//! subsequent reassessments must return L1 or higher — never L0,
+//! never Pending. The pre-fix [`assess_finality`] is stateless;
+//! a sync glitch that produces `SyncResult::Mismatch` on a block
+//! that previously had `SyncResult::Success` would compute a
+//! lower finality level for the same block. The audit (HIGH-017):
+//!
+//! > A block transitioned to L1; later, a sync glitch produces
+//! > `SyncResult::Mismatch` and the finality reassesses to L0.
+//! > Finality is supposed to be monotonic; regressing from L1 to
+//! > L0 breaks every caller assumption (wallet UI, receipt
+//! > issuance, reconciliation decisions).
+//!
+//! [`FinalityLatch`] wraps `assess_finality` with a per-block-hash
+//! "highest seen" cache. Each call to
+//! [`FinalityLatch::assess_monotonic`] computes the snapshot
+//! finality, then returns `max(stored, snapshot)` and updates the
+//! stored value. Once a block reaches L1, no subsequent
+//! assessment can return less than L1 for that block; once it
+//! reaches L2, never less than L2.
+//!
+//! Stateless [`assess_finality`] is preserved unchanged for
+//! callers that explicitly want the snapshot semantics (e.g. unit
+//! tests, instrumentation). Production callers that issue
+//! receipts, render wallet UI, or commit reconciliation decisions
+//! MUST use the latched variant.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -394,6 +423,87 @@ pub fn assess_finality(
     }
 
     Ok(FinalityLevel::Pending)
+}
+
+/// Per-block-hash "highest seen" finality cache that wraps
+/// [`assess_finality`] with monotonic semantics.
+///
+/// Once a block reaches a given finality level, subsequent calls
+/// to [`FinalityLatch::assess_monotonic`] for that block return
+/// at least that level — never lower, regardless of transient
+/// sync glitches or vote / confirmation churn.
+///
+/// See HIGH-017 in the module docstring for the rationale.
+#[derive(Debug, Clone, Default)]
+pub struct FinalityLatch {
+    /// Per-block-hash highest finality observed so far.
+    seen: HashMap<[u8; 32], FinalityLevel>,
+}
+
+impl FinalityLatch {
+    /// Create an empty latch. No blocks tracked initially.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of distinct block hashes the latch is tracking.
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Whether the latch is tracking zero blocks.
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Read-only accessor: the highest finality the latch has
+    /// observed for `block_hash`, or `None` if it has never been
+    /// assessed.
+    pub fn get(&self, block_hash: &[u8; 32]) -> Option<FinalityLevel> {
+        self.seen.get(block_hash).copied()
+    }
+
+    /// Assess `block_hash` against the same inputs as
+    /// [`assess_finality`], and return the higher of (current
+    /// snapshot, previously-latched value).
+    ///
+    /// On every call, `self.seen[block_hash]` is updated to the
+    /// returned value — so once a block reaches L1, no subsequent
+    /// call can return less than L1 for that block.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`FinalityError`] from the underlying
+    /// `assess_finality` (signature verification failures,
+    /// invalid lengths, etc.). On error, the latch is **not**
+    /// updated — the previous latched value (if any) is left
+    /// untouched.
+    pub fn assess_monotonic(
+        &mut self,
+        amount_micro_arx: u64,
+        block_hash: [u8; 32],
+        confirmations: &[SignedConfirmation],
+        sync_result: &SyncResult,
+        votes: &[SignedValidatorVote],
+        registry: &ValidatorRegistry,
+    ) -> Result<FinalityLevel, FinalityError> {
+        let snapshot = assess_finality(
+            amount_micro_arx,
+            block_hash,
+            confirmations,
+            sync_result,
+            votes,
+            registry,
+        )?;
+        let previous = self
+            .seen
+            .get(&block_hash)
+            .copied()
+            .unwrap_or(FinalityLevel::Pending);
+        let latched = std::cmp::max(previous, snapshot);
+        self.seen.insert(block_hash, latched);
+        Ok(latched)
+    }
 }
 
 #[cfg(test)]
@@ -865,5 +975,260 @@ mod tests {
     #[test]
     fn test_l2_quorum_fraction_constant_pinned() {
         assert!((L2_QUORUM_FRACTION - 0.67).abs() < 1e-9);
+    }
+
+    // ========================================================================
+    // FinalityLatch — HIGH-017 monotonic finality (commit 042).
+    //
+    // Once a block reaches level L, subsequent assessments must
+    // return ≥ L for that block. A sync glitch / vote churn /
+    // confirmation drop must NOT regress the latched value.
+    // ========================================================================
+
+    #[test]
+    fn test_latch_starts_empty() {
+        let latch = FinalityLatch::new();
+        assert!(latch.is_empty());
+        assert_eq!(latch.len(), 0);
+        assert_eq!(latch.get(&block_hash_a()), None);
+    }
+
+    #[test]
+    fn test_latch_default_equals_new() {
+        let l1 = FinalityLatch::default();
+        let l2 = FinalityLatch::new();
+        assert!(l1.is_empty());
+        assert_eq!(l1.len(), l2.len());
+    }
+
+    #[test]
+    fn test_latch_first_assessment_returns_snapshot_value() {
+        // Positive baseline: first call to assess_monotonic on a
+        // never-seen block returns the same level
+        // assess_finality would.
+        let h = block_hash_a();
+        let mut latch = FinalityLatch::new();
+        let level = latch
+            .assess_monotonic(
+                100_000_000,
+                h,
+                &[],
+                &SyncResult::NoNeighbors,
+                &[],
+                &ValidatorRegistry::new(),
+            )
+            .unwrap();
+        assert_eq!(level, FinalityLevel::Pending);
+        assert_eq!(latch.get(&h), Some(FinalityLevel::Pending));
+        assert_eq!(latch.len(), 1);
+    }
+
+    #[test]
+    fn test_latch_l1_does_not_regress_to_l0() {
+        // PRIMARY HIGH-017 PIN: the audit's exact attack scenario.
+        //
+        // Step 1: a block at the L0-cap with one valid local
+        // confirmation, sync_result = Mismatch → L0.
+        //
+        // Wait, the audit specifies L1 → L0 regression. Let's set
+        // up L1 first via SyncResult::Success, then trigger
+        // SyncResult::Mismatch.
+        let h = block_hash_a();
+        let registry = ValidatorRegistry::new();
+        let mut latch = FinalityLatch::new();
+
+        // Phase 1: sync says Success → L1.
+        let level = latch
+            .assess_monotonic(100_000_000, h, &[], &SyncResult::Success, &[], &registry)
+            .unwrap();
+        assert_eq!(level, FinalityLevel::L1, "phase 1 must reach L1");
+        assert_eq!(latch.get(&h), Some(FinalityLevel::L1));
+
+        // Phase 2: sync glitches to Mismatch. assess_finality
+        // alone would return Pending now (no confirmations, no
+        // votes, large amount). The latch must keep L1.
+        let level = latch
+            .assess_monotonic(
+                100_000_000,
+                h,
+                &[],
+                &SyncResult::Mismatch(0),
+                &[],
+                &registry,
+            )
+            .unwrap();
+        assert_eq!(
+            level,
+            FinalityLevel::L1,
+            "HIGH-017: latch must not regress L1 → Pending after sync glitch"
+        );
+        assert_eq!(latch.get(&h), Some(FinalityLevel::L1));
+    }
+
+    #[test]
+    fn test_latch_l2_does_not_regress_to_anything_lower() {
+        // Stress: reach L2 via stake-weighted quorum, then hit it
+        // with the worst possible glitch (no votes, no
+        // confirmations, sync mismatch, large amount). Latch must
+        // hold L2.
+        let h = block_hash_a();
+        let mut registry = ValidatorRegistry::new();
+
+        // 5 validators, each with 25% stake = 125% total. Need 3
+        // votes for ≥67%.
+        let (v1, pk1) = make_vote(h);
+        let (v2, pk2) = make_vote(h);
+        let (v3, pk3) = make_vote(h);
+        let (v4, pk4) = make_vote(h);
+        let (_v5, pk5) = make_vote(h);
+        registry.insert(pk1, 25);
+        registry.insert(pk2, 25);
+        registry.insert(pk3, 25);
+        registry.insert(pk4, 25);
+        registry.insert(pk5, 25);
+
+        let mut latch = FinalityLatch::new();
+        let level = latch
+            .assess_monotonic(
+                100_000_000,
+                h,
+                &[],
+                &SyncResult::Mismatch(0),
+                &[v1, v2, v3, v4],
+                &registry,
+            )
+            .unwrap();
+        assert_eq!(level, FinalityLevel::L2, "phase 1 must reach L2");
+
+        // Worst-case glitch: no votes, no confirmations, sync
+        // mismatch.
+        let level = latch
+            .assess_monotonic(
+                100_000_000,
+                h,
+                &[],
+                &SyncResult::Mismatch(0),
+                &[],
+                &registry,
+            )
+            .unwrap();
+        assert_eq!(
+            level,
+            FinalityLevel::L2,
+            "HIGH-017: latch must not regress L2 → Pending after total vote loss"
+        );
+    }
+
+    #[test]
+    fn test_latch_legitimate_upgrade_promotes() {
+        // Latch must NOT block legitimate upward transitions.
+        // Pending → L1 → L2 over three calls.
+        let h = block_hash_a();
+        let mut registry = ValidatorRegistry::new();
+        let (vote, pk) = make_vote(h);
+        registry.insert(pk, 100);
+
+        let mut latch = FinalityLatch::new();
+
+        // Phase 1: Pending.
+        let level = latch
+            .assess_monotonic(
+                100_000_000,
+                h,
+                &[],
+                &SyncResult::NoNeighbors,
+                &[],
+                &registry,
+            )
+            .unwrap();
+        assert_eq!(level, FinalityLevel::Pending);
+
+        // Phase 2: L1 (sync success).
+        let level = latch
+            .assess_monotonic(100_000_000, h, &[], &SyncResult::Success, &[], &registry)
+            .unwrap();
+        assert_eq!(level, FinalityLevel::L1);
+
+        // Phase 3: L2 (single validator with 100% stake).
+        let level = latch
+            .assess_monotonic(
+                100_000_000,
+                h,
+                &[],
+                &SyncResult::Success,
+                &[vote],
+                &registry,
+            )
+            .unwrap();
+        assert_eq!(level, FinalityLevel::L2);
+    }
+
+    #[test]
+    fn test_latch_tracks_two_blocks_independently() {
+        // The "highest seen" cache is per-block-hash. Promoting
+        // block A to L1 must NOT promote block B.
+        let ha = block_hash_a();
+        let hb = block_hash_b();
+        let registry = ValidatorRegistry::new();
+        let mut latch = FinalityLatch::new();
+
+        // Block A reaches L1.
+        latch
+            .assess_monotonic(100_000_000, ha, &[], &SyncResult::Success, &[], &registry)
+            .unwrap();
+        // Block B has no inputs → Pending.
+        let level_b = latch
+            .assess_monotonic(
+                100_000_000,
+                hb,
+                &[],
+                &SyncResult::Mismatch(0),
+                &[],
+                &registry,
+            )
+            .unwrap();
+        assert_eq!(level_b, FinalityLevel::Pending);
+        assert_eq!(latch.get(&ha), Some(FinalityLevel::L1));
+        assert_eq!(latch.get(&hb), Some(FinalityLevel::Pending));
+        assert_eq!(latch.len(), 2);
+    }
+
+    #[test]
+    fn test_latch_propagates_signature_error_without_updating() {
+        // If assess_finality returns Err (a registered validator's
+        // signature is bad), the latch must propagate the error
+        // AND leave the previously-latched value untouched. This
+        // pins the "errors don't poison the cache" contract.
+        let h = block_hash_a();
+        let (mut bad_vote, pk) = make_vote(h);
+        bad_vote.signature = vec![0u8; 64]; // invalid sig
+        let mut registry = ValidatorRegistry::new();
+        registry.insert(pk, 100);
+
+        let mut latch = FinalityLatch::new();
+
+        // Phase 1: legitimate L1.
+        latch
+            .assess_monotonic(100_000_000, h, &[], &SyncResult::Success, &[], &registry)
+            .unwrap();
+        assert_eq!(latch.get(&h), Some(FinalityLevel::L1));
+
+        // Phase 2: bad vote triggers FinalityError. The latch must
+        // not have been updated.
+        let result = latch.assess_monotonic(
+            100_000_000,
+            h,
+            &[],
+            &SyncResult::Success,
+            &[bad_vote],
+            &registry,
+        );
+        assert!(result.is_err());
+        // Latched value is still L1 from phase 1.
+        assert_eq!(
+            latch.get(&h),
+            Some(FinalityLevel::L1),
+            "errors must not corrupt the latch state"
+        );
     }
 }
