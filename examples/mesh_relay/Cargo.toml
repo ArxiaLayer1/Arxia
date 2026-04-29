@@ -12,4 +12,5 @@ arxia-core = { path = "../../crates/arxia-core" }
 arxia-crypto = { path = "../../crates/arxia-crypto" }
 arxia-transport = { path = "../../crates/arxia-transport" }
 arxia-relay = { path = "../../crates/arxia-relay" }
+ed25519-dalek = { workspace = true }
 hex = { workspace = true }
