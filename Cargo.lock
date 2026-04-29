@@ -833,6 +833,7 @@ dependencies = [
  "arxia-crypto",
  "arxia-relay",
  "arxia-transport",
+ "ed25519-dalek",
  "hex",
 ]
 
