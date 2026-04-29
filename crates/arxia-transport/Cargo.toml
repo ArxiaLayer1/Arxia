@@ -9,4 +9,7 @@ authors = []
 
 [dependencies]
 arxia-core = { path = "../arxia-core" }
+arxia-crypto = { path = "../arxia-crypto" }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
 rand = { workspace = true }

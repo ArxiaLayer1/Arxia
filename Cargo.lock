@@ -227,6 +227,9 @@ name = "arxia-transport"
 version = "0.1.0"
 dependencies = [
  "arxia-core",
+ "arxia-crypto",
+ "ed25519-dalek",
+ "hex",
  "rand",
 ]
 
