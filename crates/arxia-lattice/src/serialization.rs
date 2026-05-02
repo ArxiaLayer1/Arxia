@@ -159,7 +159,7 @@ pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
     // hash is a pure function of the serialized payload and is identical
     // across nodes with out-of-sync clocks. Regression tests below pin
     // this property.
-    let hash = Block::compute_hash(&account, &previous, &block_type, balance, nonce, timestamp);
+    let hash = Block::compute_hash(&account, &previous, &block_type, balance, nonce, timestamp)?;
     Ok(Block {
         account,
         previous,
@@ -311,7 +311,8 @@ mod tests {
             block.balance,
             block.nonce,
             block.timestamp,
-        );
+        )
+        .unwrap();
         assert_eq!(recomputed, block.hash);
     }
 

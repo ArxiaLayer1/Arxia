@@ -455,7 +455,8 @@ mod tests {
             new_balance,
             new_nonce,
             timestamp,
-        );
+        )
+        .unwrap();
         let hash_bytes = hex::decode(&hash).unwrap();
         let signature = receiver.signing_key().sign(&hash_bytes).to_bytes().to_vec();
         let block = Block {
