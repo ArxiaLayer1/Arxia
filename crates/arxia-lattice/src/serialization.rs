@@ -132,10 +132,22 @@ pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
     } else {
         hex::encode(prev_raw)
     };
-    let balance = u64::from_be_bytes(data[65..73].try_into().expect("8 bytes"));
-    let nonce = u64::from_be_bytes(data[73..81].try_into().expect("8 bytes"));
-    let timestamp = u64::from_be_bytes(data[81..89].try_into().expect("8 bytes"));
-    let amount = u64::from_be_bytes(data[89..97].try_into().expect("8 bytes"));
+    // MED-003 (commit 051): typed-error on slice-to-array conversion.
+    // The length check above (`data.len() < COMPACT_BLOCK_SIZE`)
+    // makes these `try_into` failures unreachable at runtime
+    // today. Defense-in-depth: if a future refactor weakens the
+    // length check, the panic becomes a typed `DataTooShort`
+    // instead of an `unwrap` panic.
+    let to_8_bytes = |slice: &[u8]| -> Result<[u8; 8], ArxiaError> {
+        slice.try_into().map_err(|_| ArxiaError::DataTooShort {
+            got: data.len(),
+            expected: COMPACT_BLOCK_SIZE,
+        })
+    };
+    let balance = u64::from_be_bytes(to_8_bytes(&data[65..73])?);
+    let nonce = u64::from_be_bytes(to_8_bytes(&data[73..81])?);
+    let timestamp = u64::from_be_bytes(to_8_bytes(&data[81..89])?);
+    let amount = u64::from_be_bytes(to_8_bytes(&data[89..97])?);
     let dest_src = hex::encode(&data[97..129]);
     let signature = data[129..193].to_vec();
     let block_type = match tag {
@@ -441,5 +453,66 @@ mod tests {
         // Regression guard: legitimate blocks still serialize cleanly.
         let block = base_open_block();
         assert!(to_compact_bytes(&block).is_ok());
+    }
+
+    // ============================================================
+    // MED-003 (commit 051) — from_compact_bytes typed-error
+    // on slice-to-array conversion. The length-check at
+    // function entry makes these conversions unreachable in
+    // practice; the typed error is a defense-in-depth against
+    // future refactors that weaken the guard.
+    // ============================================================
+
+    #[test]
+    fn test_from_compact_bytes_round_trips_canonical_block() {
+        // Positive regression: a canonical block survives
+        // to_compact_bytes → from_compact_bytes round-trip.
+        let block = base_open_block();
+        let bytes = to_compact_bytes(&block).unwrap();
+        let decoded = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(decoded.account, block.account);
+        assert_eq!(decoded.balance, block.balance);
+        assert_eq!(decoded.nonce, block.nonce);
+        assert_eq!(decoded.timestamp, block.timestamp);
+    }
+
+    #[test]
+    fn test_from_compact_bytes_returns_data_too_short_on_short_input() {
+        // PRIMARY MED-003 PIN: short input is rejected with
+        // typed `DataTooShort` rather than panicking. The
+        // length-check at function entry already does this,
+        // but we pin it explicitly so the typed-error contract
+        // is clear.
+        let short = vec![0u8; 100];
+        let result = from_compact_bytes(&short);
+        assert!(matches!(
+            result,
+            Err(ArxiaError::DataTooShort {
+                got: 100,
+                expected: 193
+            })
+        ));
+    }
+
+    #[test]
+    fn test_from_compact_bytes_no_unguarded_expect_in_module() {
+        // MED-003 STRUCTURAL PIN (compile-time / source lint).
+        // Read this file at compile time and assert the
+        // production-code section (everything before
+        // `#[cfg(test)]\nmod tests`) does NOT contain
+        // `.expect("8 bytes")` — the original panic-prone
+        // pattern. This catches a future regression that
+        // reintroduces the panic-on-slice form.
+        const SELF_SOURCE: &str = include_str!("serialization.rs");
+        let test_marker = "#[cfg(test)]\nmod tests";
+        let production = SELF_SOURCE
+            .split(test_marker)
+            .next()
+            .expect("split always yields >=1 segment");
+        assert!(
+            !production.contains(".expect(\"8 bytes\")"),
+            "MED-003: production code must use typed `?` propagation \
+             instead of .expect(\"8 bytes\") on slice-to-array conversions"
+        );
     }
 }
