@@ -1,6 +1,40 @@
 //! Relay node reputation scoring.
+//!
+//! # Rolling-window score (HIGH-015, commit 048)
+//!
+//! Pre-fix [`RelayScore::score`] is lifetime-cumulative: a relay
+//! that was legitimate for 29 days then turns hostile keeps its
+//! accumulated trust indefinitely. The audit (HIGH-015):
+//!
+//! > Constant `RELAY_SCORING_WINDOW_DAYS = 30` exists in core,
+//! > but `scoring.rs` has no timestamped entries and no
+//! > pruning; score is lifetime-cumulative. A relay that was
+//! > legitimate for 29 days and then goes hostile keeps its
+//! > trust indefinitely; a new relay can never catch up.
+//! > Suggested fix direction: replace counters with a ring
+//! > buffer of timestamped receipts; compute score as a function
+//! > of the last 30 days only.
+//!
+//! [`RelayScore::record_success_at`] /
+//! [`RelayScore::record_failure_at`] are the timestamped
+//! variants that append to a `VecDeque` of
+//! `(timestamp_ms, delta)` events.
+//! [`RelayScore::rolling_score`] returns the score considering
+//! only events within the last
+//! [`RelayScore::ROLLING_WINDOW_MS`] milliseconds
+//! (= 30 days × 86_400_000). Older events can be dropped via
+//! [`RelayScore::prune_rolling`].
+//!
+//! The pre-existing cumulative methods
+//! ([`RelayScore::record_success`],
+//! [`RelayScore::record_failure`]) are preserved unchanged.
+//! Production callers that want rolling-window scoring opt in
+//! via the `_at` variants; the cumulative `score: i64` field
+//! remains for callers that prefer the lifetime view.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+
+use arxia_core::constants::RELAY_SCORING_WINDOW_DAYS;
 
 use crate::receipt::{RelayReceipt, RelayReceiptError};
 use crate::slashing::{SlashingError, SlashingProof};
@@ -29,9 +63,40 @@ pub struct RelayScore {
     /// fixed upper bound / LRU eviction policy is a separate concern
     /// tracked as CRIT-011.
     credited_messages: HashSet<[u8; 32]>,
+    /// Ring buffer of timestamped score events for HIGH-015
+    /// rolling-window scoring. Each entry is
+    /// `(timestamp_ms, delta_i32)`; `delta` is `+1` for success
+    /// and `-5` for failure (matching the cumulative `score`
+    /// math). NOT `pub` — callers interact via
+    /// [`RelayScore::record_success_at`],
+    /// [`RelayScore::record_failure_at`],
+    /// [`RelayScore::rolling_score`], and
+    /// [`RelayScore::prune_rolling`].
+    rolling_events: VecDeque<(u64, i32)>,
 }
 
 impl RelayScore {
+    /// Width of the rolling-score window in milliseconds. Equals
+    /// `RELAY_SCORING_WINDOW_DAYS × 86_400_000` (= 30 ×
+    /// 86_400_000 = 2 592 000 000 ms). Events older than this
+    /// relative to the supplied `now_ms` do not contribute to
+    /// [`RelayScore::rolling_score`] and are dropped by
+    /// [`RelayScore::prune_rolling`].
+    pub const ROLLING_WINDOW_MS: u64 = RELAY_SCORING_WINDOW_DAYS * 86_400_000;
+
+    /// Score contribution of a successful relay (+1, matches the
+    /// cumulative `score` increment).
+    pub const SUCCESS_DELTA: i32 = 1;
+
+    /// Score contribution of a failed relay (-5, matches the
+    /// cumulative `score` decrement).
+    pub const FAILURE_DELTA: i32 = -5;
+
+    /// Baseline score returned by `rolling_score` when no events
+    /// fall within the window. Matches the construction default
+    /// of `score: 100`.
+    pub const ROLLING_BASELINE: i64 = 100;
+
     /// Create a new relay score with default values.
     pub fn new(relay_id: String) -> Self {
         Self {
@@ -40,6 +105,7 @@ impl RelayScore {
             messages_relayed: 0,
             messages_failed: 0,
             credited_messages: HashSet::new(),
+            rolling_events: VecDeque::new(),
         }
     }
 
@@ -121,6 +187,85 @@ impl RelayScore {
     /// Whether this relay is in good standing.
     pub fn is_trusted(&self) -> bool {
         self.score > 0
+    }
+
+    /// Record a successful relay AND append a `+SUCCESS_DELTA`
+    /// event to the rolling-window buffer at `now_ms`. See
+    /// HIGH-015 in the module docstring.
+    ///
+    /// Behaviour: same checks and side effects as
+    /// [`RelayScore::record_success`] (cumulative `score` and
+    /// `messages_relayed` advance, dedup gate fires); on
+    /// success the rolling buffer also gets a new entry, and
+    /// stale entries (older than `now_ms - ROLLING_WINDOW_MS`)
+    /// are pruned.
+    ///
+    /// Errors leave both the cumulative state AND the rolling
+    /// buffer unchanged.
+    pub fn record_success_at(
+        &mut self,
+        receipt: &RelayReceipt,
+        now_ms: u64,
+    ) -> Result<(), RelayReceiptError> {
+        self.record_success(receipt)?;
+        self.rolling_events.push_back((now_ms, Self::SUCCESS_DELTA));
+        self.prune_rolling(now_ms);
+        Ok(())
+    }
+
+    /// Record a failed relay AND append a `FAILURE_DELTA` event
+    /// to the rolling-window buffer at `now_ms`. Same cumulative
+    /// side effects as [`RelayScore::record_failure`], plus the
+    /// buffer append + prune.
+    pub fn record_failure_at(&mut self, now_ms: u64) {
+        self.record_failure();
+        self.rolling_events.push_back((now_ms, Self::FAILURE_DELTA));
+        self.prune_rolling(now_ms);
+    }
+
+    /// Compute the rolling score considering only events whose
+    /// timestamp is within `[now_ms - ROLLING_WINDOW_MS, now_ms]`.
+    /// Returns `ROLLING_BASELINE` (100) plus the sum of
+    /// in-window event deltas.
+    ///
+    /// This method is read-only; it does not prune the buffer.
+    /// Call [`RelayScore::prune_rolling`] separately to bound memory.
+    pub fn rolling_score(&self, now_ms: u64) -> i64 {
+        let cutoff = now_ms.saturating_sub(Self::ROLLING_WINDOW_MS);
+        let delta_sum: i64 = self
+            .rolling_events
+            .iter()
+            .filter(|&&(t, _)| t >= cutoff)
+            .map(|&(_, d)| d as i64)
+            .sum();
+        Self::ROLLING_BASELINE.saturating_add(delta_sum)
+    }
+
+    /// Drop rolling-buffer entries strictly older than
+    /// `now_ms - ROLLING_WINDOW_MS`. The buffer is sorted by
+    /// insertion order (which equals timestamp order under the
+    /// monotonic-clock assumption); pop from the front until we
+    /// see an in-window event.
+    ///
+    /// Idempotent: calling twice with the same `now_ms` is a
+    /// no-op the second time. Storage is bounded by the rate of
+    /// successful + failed relays in the window.
+    pub fn prune_rolling(&mut self, now_ms: u64) {
+        let cutoff = now_ms.saturating_sub(Self::ROLLING_WINDOW_MS);
+        while let Some(&(t, _)) = self.rolling_events.front() {
+            if t < cutoff {
+                self.rolling_events.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Number of events currently buffered in the rolling
+    /// window (after the most recent prune). Useful for tests
+    /// and observability.
+    pub fn rolling_events_count(&self) -> usize {
+        self.rolling_events.len()
     }
 }
 
@@ -613,5 +758,226 @@ mod tests {
             "rejected receipt must not poison the dedup set"
         );
         assert_eq!(score.score, 101);
+    }
+
+    // ============================================================
+    // HIGH-015 (commit 048) — rolling-window scoring.
+    //
+    // The audit's exact attack: a relay legitimate for 29 days,
+    // hostile on day 30. Cumulative `score` reflects 29 days of
+    // good behaviour; `rolling_score` reflects only the last 30
+    // days' worth of events (which after enough time becomes
+    // just the hostile activity).
+    // ============================================================
+
+    /// Build a fresh signed receipt with a unique message_hash so
+    /// the dedup gate doesn't fire across multiple successes.
+    fn unique_signed_receipt(
+        sk: &ed25519_dalek::SigningKey,
+        relay_pk: &[u8; 32],
+        nonce: u64,
+    ) -> RelayReceipt {
+        let relay_id_hex = hex::encode(relay_pk);
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&nonce.to_be_bytes());
+        let mut r = RelayReceipt {
+            relay_id: relay_id_hex,
+            message_hash: hex::encode(bytes),
+            timestamp: nonce,
+            signature: Vec::new(),
+            hop_count: 1,
+        };
+        let msg = r.canonical_message().unwrap();
+        r.signature = sign(sk, &msg).to_vec();
+        r
+    }
+
+    const DAY_MS: u64 = 86_400_000;
+
+    #[test]
+    fn test_rolling_score_starts_at_baseline_with_no_events() {
+        let score = RelayScore::new(hex::encode([0u8; 32]));
+        assert_eq!(score.rolling_score(0), RelayScore::ROLLING_BASELINE);
+        assert_eq!(score.rolling_score(u64::MAX), RelayScore::ROLLING_BASELINE);
+    }
+
+    #[test]
+    fn test_rolling_window_constant_value() {
+        // Pin: 30 days × 86_400_000 ms = 2_592_000_000 ms.
+        assert_eq!(RelayScore::ROLLING_WINDOW_MS, 30 * 86_400_000);
+        assert_eq!(RelayScore::ROLLING_WINDOW_MS, 2_592_000_000);
+    }
+
+    #[test]
+    fn test_rolling_score_includes_recent_success() {
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let r = unique_signed_receipt(&sk, &pk, 1);
+        let mut score = RelayScore::new(hex::encode(pk));
+        // Record at t = 1_000_000.
+        score.record_success_at(&r, 1_000_000).unwrap();
+        // Score immediately afterwards = baseline + 1.
+        assert_eq!(
+            score.rolling_score(1_000_000),
+            RelayScore::ROLLING_BASELINE + 1
+        );
+    }
+
+    #[test]
+    fn test_rolling_score_excludes_event_just_outside_window() {
+        // PRIMARY HIGH-015 PIN.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let r = unique_signed_receipt(&sk, &pk, 1);
+        let mut score = RelayScore::new(hex::encode(pk));
+        // Record at t = 0.
+        score.record_success_at(&r, 0).unwrap();
+        // Query at t = ROLLING_WINDOW_MS + 1 (event is now
+        // strictly older than the cutoff).
+        let later = RelayScore::ROLLING_WINDOW_MS + 1;
+        assert_eq!(score.rolling_score(later), RelayScore::ROLLING_BASELINE);
+    }
+
+    #[test]
+    fn test_rolling_score_includes_event_at_exact_window_boundary() {
+        // Boundary: event at t such that
+        // now_ms - t == ROLLING_WINDOW_MS exactly is INCLUSIVE
+        // (cutoff is `>= cutoff` in the filter).
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let r = unique_signed_receipt(&sk, &pk, 1);
+        let mut score = RelayScore::new(hex::encode(pk));
+        score.record_success_at(&r, 0).unwrap();
+        // At t = ROLLING_WINDOW_MS, event timestamp is exactly
+        // at the cutoff (cutoff = now - WINDOW = 0). So it IS
+        // included.
+        assert_eq!(
+            score.rolling_score(RelayScore::ROLLING_WINDOW_MS),
+            RelayScore::ROLLING_BASELINE + 1
+        );
+    }
+
+    #[test]
+    fn test_rolling_score_audit_attack_29_days_good_then_30th_bad() {
+        // PRIMARY HIGH-015 PIN: the audit's exact scenario.
+        // Day 1-29: 29 successful relays.
+        // Day 30: 5 failures.
+        // Day 31 (now), rolling score reflects only the 30th
+        // day's failures + the day 1-29 successes that are still
+        // within the window.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let mut score = RelayScore::new(hex::encode(pk));
+
+        // Day 1: 29 successes spread across days 1-29.
+        for d in 1..=29u64 {
+            let r = unique_signed_receipt(&sk, &pk, d);
+            let t = d * DAY_MS;
+            score.record_success_at(&r, t).unwrap();
+        }
+        // Day 30: 5 failures.
+        let day_30 = 30 * DAY_MS;
+        for _ in 0..5 {
+            score.record_failure_at(day_30);
+        }
+
+        // Cumulative score: 100 + 29 - 25 = 104.
+        assert_eq!(score.score, 100 + 29 - 25);
+
+        // Rolling score at end of day 30 = baseline + 29 - 25 = 104 also
+        // (all events within 30-day window).
+        assert_eq!(score.rolling_score(day_30), 100 + 29 - 25);
+
+        // Now jump to day 60. All day-1-29 successes are
+        // strictly older than the 30-day window (day 60 - 30 =
+        // day 30 cutoff; events on day 1-29 are < day 30 →
+        // pruned). Only the day-30 failures remain (since
+        // day_30 == cutoff, they ARE within the window).
+        let day_60 = 60 * DAY_MS;
+        let rolling_d60 = score.rolling_score(day_60);
+        assert_eq!(
+            rolling_d60,
+            RelayScore::ROLLING_BASELINE + 5 * (RelayScore::FAILURE_DELTA as i64)
+        );
+        assert_eq!(rolling_d60, 100 - 25);
+        assert_eq!(rolling_d60, 75);
+        // Cumulative is unchanged at 104 — the audit's exact
+        // observation that lifetime score doesn't reflect
+        // recent hostile behaviour.
+        assert_eq!(score.score, 104);
+    }
+
+    #[test]
+    fn test_prune_rolling_drops_old_events() {
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let r = unique_signed_receipt(&sk, &pk, 1);
+        let mut score = RelayScore::new(hex::encode(pk));
+        score.record_success_at(&r, 0).unwrap();
+        assert_eq!(score.rolling_events_count(), 1);
+        // Prune at t > WINDOW: event is dropped.
+        score.prune_rolling(RelayScore::ROLLING_WINDOW_MS + 1);
+        assert_eq!(score.rolling_events_count(), 0);
+    }
+
+    #[test]
+    fn test_prune_rolling_keeps_recent_events() {
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let r = unique_signed_receipt(&sk, &pk, 1);
+        let mut score = RelayScore::new(hex::encode(pk));
+        score.record_success_at(&r, 1_000_000).unwrap();
+        // Prune at t still within the window.
+        score.prune_rolling(2_000_000);
+        assert_eq!(score.rolling_events_count(), 1);
+    }
+
+    #[test]
+    fn test_record_success_at_does_not_double_credit_on_dedup_failure() {
+        // The cumulative dedup gate (CRIT-005) MUST still fire:
+        // re-recording the same receipt returns
+        // DuplicateReceipt and DOES NOT add a duplicate event
+        // to the rolling buffer.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let r = unique_signed_receipt(&sk, &pk, 1);
+        let mut score = RelayScore::new(hex::encode(pk));
+        score.record_success_at(&r, 1_000_000).unwrap();
+        let r2 = score.record_success_at(&r, 2_000_000);
+        assert_eq!(r2, Err(RelayReceiptError::DuplicateReceipt));
+        // Rolling buffer still has only the one event from the
+        // first record.
+        assert_eq!(score.rolling_events_count(), 1);
+        // Rolling score still +1.
+        assert_eq!(
+            score.rolling_score(2_000_000),
+            RelayScore::ROLLING_BASELINE + 1
+        );
+    }
+
+    #[test]
+    fn test_record_failure_at_appends_failure_event() {
+        let mut score = RelayScore::new(hex::encode([0u8; 32]));
+        score.record_failure_at(1_000_000);
+        assert_eq!(score.rolling_events_count(), 1);
+        assert_eq!(
+            score.rolling_score(1_000_000),
+            RelayScore::ROLLING_BASELINE + (RelayScore::FAILURE_DELTA as i64)
+        );
+        assert_eq!(score.rolling_score(1_000_000), 95);
+    }
+
+    #[test]
+    fn test_rolling_score_combines_success_and_failure_within_window() {
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let mut score = RelayScore::new(hex::encode(pk));
+        let r1 = unique_signed_receipt(&sk, &pk, 1);
+        let r2 = unique_signed_receipt(&sk, &pk, 2);
+        score.record_success_at(&r1, 100).unwrap();
+        score.record_failure_at(200);
+        score.record_success_at(&r2, 300).unwrap();
+        // 100 + 1 - 5 + 1 = 97.
+        assert_eq!(score.rolling_score(300), 97);
     }
 }
