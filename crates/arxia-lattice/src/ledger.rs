@@ -227,7 +227,8 @@ mod tests {
             balance,
             nonce,
             timestamp,
-        );
+        )
+        .expect("test helper: canonical BlockType always serializes");
         let hash_bytes = hex::decode(&hash).expect("valid hex hash");
         let signature = alice.signing_key().sign(&hash_bytes);
         Block {

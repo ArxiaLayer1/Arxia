@@ -154,7 +154,7 @@ impl AccountChain {
             self.balance,
             self.nonce,
             timestamp,
-        );
+        )?;
         // CRITICAL: sign raw Blake3 bytes (32 bytes), NOT hex string
         let hash_bytes = hex::decode(&hash).expect("valid hex hash");
         let signature = self.signing_key.sign(&hash_bytes);
@@ -228,7 +228,7 @@ impl AccountChain {
             self.balance,
             self.nonce,
             timestamp,
-        );
+        )?;
         let hash_bytes = hex::decode(&hash).expect("valid hex hash");
         let signature = self.signing_key.sign(&hash_bytes);
         let block = Block {
@@ -312,7 +312,7 @@ impl AccountChain {
             self.balance,
             self.nonce,
             timestamp,
-        );
+        )?;
         let hash_bytes = hex::decode(&hash).expect("valid hex hash");
         let signature = self.signing_key.sign(&hash_bytes);
         let block = Block {

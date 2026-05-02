@@ -13,7 +13,7 @@ pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
         block.balance,
         block.nonce,
         block.timestamp,
-    );
+    )?;
     if expected_hash != block.hash {
         return Err(ArxiaError::HashMismatch);
     }
