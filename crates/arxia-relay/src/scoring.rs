@@ -31,8 +31,38 @@
 //! Production callers that want rolling-window scoring opt in
 //! via the `_at` variants; the cumulative `score: i64` field
 //! remains for callers that prefer the lifetime view.
+//!
+//! # Per-target censorship detection (HIGH-016, commit 049)
+//!
+//! Aggregate scoring (lifetime or rolling) cannot detect a relay
+//! that forwards 99% of messages globally but drops 100% of one
+//! specific target's messages. The audit (HIGH-016):
+//!
+//! > A relay forwards 99% of messages but drops 100% of Alice's
+//! > messages. Aggregate score stays at ~99% (trusted), but
+//! > Alice is censored; the scoring design cannot see this.
+//! > Suggested fix direction: track success rate per-sender
+//! > (or per-destination) with a minimum sample size; flag
+//! > relays whose per-target variance exceeds a threshold.
+//!
+//! [`RelayScore::record_success_for_target`] /
+//! [`RelayScore::record_failure_for_target`] track per-target
+//! event counts in addition to the cumulative / rolling state.
+//! "Target" is a 32-byte identifier supplied by the caller —
+//! typically the sender or destination pubkey decoded from the
+//! gossiped payload. The caller decides what counts as a
+//! target so the scoring layer stays decoupled from message
+//! semantics.
+//!
+//! [`RelayScore::per_target_success_rate`] returns
+//! `(successes, failures, rate)` for a target (or `None` if
+//! the target has no events). [`RelayScore::flag_per_target_anomalies`]
+//! returns the list of targets whose success rate is at or below
+//! a caller-supplied threshold AND who have at least `min_sample`
+//! events — matching the audit's "minimum sample size +
+//! variance threshold" recommendation.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use arxia_core::constants::RELAY_SCORING_WINDOW_DAYS;
 
@@ -73,6 +103,16 @@ pub struct RelayScore {
     /// [`RelayScore::rolling_score`], and
     /// [`RelayScore::prune_rolling`].
     rolling_events: VecDeque<(u64, i32)>,
+    /// Per-target success/failure counts for HIGH-016
+    /// per-target censorship detection. Keyed by a 32-byte
+    /// caller-supplied identifier (typically a sender or
+    /// destination pubkey). Each entry is
+    /// `(successes, failures)`. NOT `pub` — callers interact
+    /// via [`RelayScore::record_success_for_target`],
+    /// [`RelayScore::record_failure_for_target`],
+    /// [`RelayScore::per_target_success_rate`], and
+    /// [`RelayScore::flag_per_target_anomalies`].
+    per_target_counts: HashMap<[u8; 32], (u64, u64)>,
 }
 
 impl RelayScore {
@@ -106,6 +146,7 @@ impl RelayScore {
             messages_failed: 0,
             credited_messages: HashSet::new(),
             rolling_events: VecDeque::new(),
+            per_target_counts: HashMap::new(),
         }
     }
 
@@ -266,6 +307,103 @@ impl RelayScore {
     /// and observability.
     pub fn rolling_events_count(&self) -> usize {
         self.rolling_events.len()
+    }
+
+    /// Record a successful relay AND increment the per-target
+    /// success count for `target`. See HIGH-016 in the module
+    /// docstring.
+    ///
+    /// Behaviour: same checks and side effects as
+    /// [`RelayScore::record_success`] (cumulative + dedup
+    /// gates fire); on success the per-target counter for
+    /// `target` is incremented.
+    ///
+    /// `target` is a caller-supplied 32-byte identifier; the
+    /// scoring layer is decoupled from what it semantically
+    /// means (sender, destination, message-class).
+    ///
+    /// Errors leave both the cumulative state AND the
+    /// per-target counters unchanged.
+    pub fn record_success_for_target(
+        &mut self,
+        receipt: &RelayReceipt,
+        target: &[u8; 32],
+    ) -> Result<(), RelayReceiptError> {
+        self.record_success(receipt)?;
+        let entry = self.per_target_counts.entry(*target).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(1);
+        Ok(())
+    }
+
+    /// Record a failed relay AND increment the per-target
+    /// failure count for `target`. Same cumulative side
+    /// effects as [`RelayScore::record_failure`], plus the
+    /// per-target counter increment.
+    pub fn record_failure_for_target(&mut self, target: &[u8; 32]) {
+        self.record_failure();
+        let entry = self.per_target_counts.entry(*target).or_insert((0, 0));
+        entry.1 = entry.1.saturating_add(1);
+    }
+
+    /// Per-target observed event counts and computed success
+    /// rate.
+    ///
+    /// Returns `Some((successes, failures, rate))` where `rate
+    /// = successes as f64 / (successes + failures) as f64`,
+    /// or `None` if the target has no recorded events.
+    pub fn per_target_success_rate(&self, target: &[u8; 32]) -> Option<(u64, u64, f64)> {
+        let (s, f) = self.per_target_counts.get(target).copied()?;
+        let total = s.saturating_add(f);
+        if total == 0 {
+            return None;
+        }
+        let rate = s as f64 / total as f64;
+        Some((s, f, rate))
+    }
+
+    /// Number of distinct targets currently tracked.
+    pub fn per_target_count(&self) -> usize {
+        self.per_target_counts.len()
+    }
+
+    /// Flag targets whose per-target success rate is at or
+    /// below `threshold` AND who have at least `min_sample`
+    /// events recorded. Returns the offending target IDs.
+    ///
+    /// HIGH-016 PRIMARY: detects relays that drop a specific
+    /// target's messages while maintaining a high aggregate
+    /// score. The audit's "minimum sample size + variance
+    /// threshold" recommendation; we use absolute rate (not
+    /// variance against the aggregate) for simplicity, but a
+    /// future enhancement could swap in stddev-based
+    /// detection.
+    ///
+    /// `min_sample`: minimum total events
+    /// (successes + failures) before a target is eligible.
+    /// Below this, the target is treated as not having
+    /// statistical signal and is skipped.
+    /// `threshold`: success rate at or below which a target
+    /// is flagged. `0.5` means "≤ 50% success rate".
+    ///
+    /// Output ordering is unspecified (HashMap iteration is
+    /// non-deterministic); callers that need a stable order
+    /// must sort the result.
+    pub fn flag_per_target_anomalies(&self, min_sample: u64, threshold: f64) -> Vec<[u8; 32]> {
+        self.per_target_counts
+            .iter()
+            .filter_map(|(target, &(s, f))| {
+                let total = s.saturating_add(f);
+                if total < min_sample {
+                    return None;
+                }
+                let rate = s as f64 / total as f64;
+                if rate <= threshold {
+                    Some(*target)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -979,5 +1117,172 @@ mod tests {
         score.record_success_at(&r2, 300).unwrap();
         // 100 + 1 - 5 + 1 = 97.
         assert_eq!(score.rolling_score(300), 97);
+    }
+
+    // ============================================================
+    // HIGH-016 (commit 049) — per-target censorship detection.
+    //
+    // The audit's exact attack: a relay forwards 99% of
+    // messages globally but drops 100% of Alice's messages.
+    // Aggregate score stays high; `flag_per_target_anomalies`
+    // surfaces Alice as a censored target.
+    // ============================================================
+
+    #[test]
+    fn test_per_target_starts_empty() {
+        let score = RelayScore::new(hex::encode([0u8; 32]));
+        assert_eq!(score.per_target_count(), 0);
+        assert_eq!(score.per_target_success_rate(&[1u8; 32]), None);
+    }
+
+    #[test]
+    fn test_record_success_for_target_increments_count() {
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let r = unique_signed_receipt(&sk, &pk, 1);
+        let mut score = RelayScore::new(hex::encode(pk));
+        let target = [0xAAu8; 32];
+        score.record_success_for_target(&r, &target).unwrap();
+        let (s, f, rate) = score.per_target_success_rate(&target).unwrap();
+        assert_eq!(s, 1);
+        assert_eq!(f, 0);
+        assert!((rate - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_record_failure_for_target_increments_count() {
+        let target = [0xAAu8; 32];
+        let mut score = RelayScore::new(hex::encode([0u8; 32]));
+        score.record_failure_for_target(&target);
+        let (s, f, rate) = score.per_target_success_rate(&target).unwrap();
+        assert_eq!(s, 0);
+        assert_eq!(f, 1);
+        assert!((rate - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_per_target_independent_targets_tracked_separately() {
+        // Pin: counts for one target don't leak into another.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let mut score = RelayScore::new(hex::encode(pk));
+        let alice = [0xAAu8; 32];
+        let bob = [0xBBu8; 32];
+        let r1 = unique_signed_receipt(&sk, &pk, 1);
+        let r2 = unique_signed_receipt(&sk, &pk, 2);
+        score.record_success_for_target(&r1, &alice).unwrap();
+        score.record_failure_for_target(&bob);
+        score.record_success_for_target(&r2, &alice).unwrap();
+        let (sa, fa, _) = score.per_target_success_rate(&alice).unwrap();
+        let (sb, fb, _) = score.per_target_success_rate(&bob).unwrap();
+        assert_eq!((sa, fa), (2, 0));
+        assert_eq!((sb, fb), (0, 1));
+        assert_eq!(score.per_target_count(), 2);
+    }
+
+    #[test]
+    fn test_flag_per_target_anomalies_audit_attack() {
+        // PRIMARY HIGH-016 PIN: the audit's exact scenario.
+        // Relay forwards 99% globally (99 successes for "bob"
+        // target, 1 failure scattered) but drops 100% of
+        // Alice's messages (5 failures, 0 successes).
+        //
+        // Aggregate score (cumulative): 100 + 99 - 5*5 - 1*5 =
+        // 100 + 99 - 30 = 169 — a "trusted" relay.
+        //
+        // flag_per_target_anomalies(min_sample=5, threshold=0.5)
+        // returns Alice (rate 0%) and not Bob (rate 99%).
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let mut score = RelayScore::new(hex::encode(pk));
+        let alice = [0xAAu8; 32];
+        let bob = [0xBBu8; 32];
+
+        // 99 successes for Bob.
+        for n in 0..99u64 {
+            let r = unique_signed_receipt(&sk, &pk, n);
+            score.record_success_for_target(&r, &bob).unwrap();
+        }
+        // 5 failures for Alice (Alice's messages all dropped).
+        for _ in 0..5 {
+            score.record_failure_for_target(&alice);
+        }
+        // 1 failure attributed elsewhere (cumulative noise).
+        score.record_failure();
+
+        // Aggregate score is high — relay looks trusted.
+        assert!(score.is_trusted());
+        // Per-target detection surfaces Alice.
+        let flagged = score.flag_per_target_anomalies(5, 0.5);
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0], alice);
+    }
+
+    #[test]
+    fn test_flag_per_target_anomalies_below_min_sample_skipped() {
+        // Even with rate = 0%, a target with fewer than
+        // min_sample events is skipped. Pin against false-
+        // positives on small samples.
+        let target = [0xCCu8; 32];
+        let mut score = RelayScore::new(hex::encode([0u8; 32]));
+        // 2 failures, no successes.
+        score.record_failure_for_target(&target);
+        score.record_failure_for_target(&target);
+        let flagged = score.flag_per_target_anomalies(5, 0.5);
+        assert!(flagged.is_empty(), "below min_sample must not be flagged");
+    }
+
+    #[test]
+    fn test_flag_per_target_anomalies_above_threshold_not_flagged() {
+        // Healthy target (100% success) is NOT flagged.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let mut score = RelayScore::new(hex::encode(pk));
+        let target = [0xDDu8; 32];
+        for n in 0..10u64 {
+            let r = unique_signed_receipt(&sk, &pk, n);
+            score.record_success_for_target(&r, &target).unwrap();
+        }
+        let flagged = score.flag_per_target_anomalies(5, 0.5);
+        assert!(flagged.is_empty());
+    }
+
+    #[test]
+    fn test_flag_per_target_anomalies_exactly_at_threshold_is_flagged() {
+        // Boundary: rate exactly equal to threshold is flagged
+        // (`<=` not `<`). Pins the inclusive boundary.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let mut score = RelayScore::new(hex::encode(pk));
+        let target = [0xEEu8; 32];
+        // 5 successes + 5 failures = 50% rate.
+        for n in 0..5u64 {
+            let r = unique_signed_receipt(&sk, &pk, n);
+            score.record_success_for_target(&r, &target).unwrap();
+        }
+        for _ in 0..5 {
+            score.record_failure_for_target(&target);
+        }
+        let flagged = score.flag_per_target_anomalies(5, 0.5);
+        assert_eq!(flagged, vec![target]);
+    }
+
+    #[test]
+    fn test_per_target_dedup_failure_does_not_count_target() {
+        // CRIT-005 dedup gate fires even on
+        // record_success_for_target. The per-target counter
+        // must NOT advance for a duplicate receipt.
+        let (sk, vk) = generate_keypair();
+        let pk = vk.to_bytes();
+        let r = unique_signed_receipt(&sk, &pk, 1);
+        let mut score = RelayScore::new(hex::encode(pk));
+        let target = [0xFFu8; 32];
+        score.record_success_for_target(&r, &target).unwrap();
+        // Replay same receipt → DuplicateReceipt error.
+        let result = score.record_success_for_target(&r, &target);
+        assert_eq!(result, Err(RelayReceiptError::DuplicateReceipt));
+        // Per-target counter still 1, not 2.
+        let (s, f, _) = score.per_target_success_rate(&target).unwrap();
+        assert_eq!((s, f), (1, 0));
     }
 }
