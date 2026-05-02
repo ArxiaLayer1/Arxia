@@ -1,5 +1,17 @@
 //! OR-Set (Observed-Remove Set) CRDT with add-wins semantics.
 //!
+//! # Serializable for replica transmission (MED-015, commit 054)
+//!
+//! [`ORSet`] derives `Serialize` / `Deserialize`. CRDTs travel
+//! between replicas to converge state — without serde derives,
+//! the type couldn't be sent over the wire, defeating the
+//! purpose of being a CRDT. The audit (MED-015):
+//!
+//! > Can't be sent over the wire — defeats the CRDT purpose
+//! > if it's intended to travel between replicas.
+//! > Suggested fix direction: derive `Serialize`/`Deserialize`;
+//! > add round-trip tests.
+//!
 //! # `remove` returns existence (MED-014, commit 053)
 //!
 //! Pre-fix [`ORSet::remove`] returned `()`, so callers couldn't
@@ -22,8 +34,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 /// OR-Set with unique tags for add-wins conflict resolution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ORSet<T: Ord + Eq + Clone> {
     elements: BTreeMap<T, BTreeSet<String>>,
     tag_counter: u64,
@@ -150,5 +164,77 @@ mod tests {
         assert!(a.contains(&"carol".to_string()));
         assert!(a.remove(&"carol".to_string()));
         assert!(!a.contains(&"carol".to_string()));
+    }
+
+    // ============================================================
+    // MED-015 (commit 054) — ORSet derives Serialize/Deserialize
+    // for replica transmission.
+    // ============================================================
+
+    #[test]
+    fn test_or_set_serializes_to_json_round_trip() {
+        // PRIMARY MED-015 PIN: an OR-Set populated with state
+        // round-trips through serde_json with `PartialEq`
+        // equality. This is the canonical "wire-transmissible
+        // CRDT" property the audit asked to pin.
+        let mut s: ORSet<String> = ORSet::new("node-a");
+        s.add("alice".to_string());
+        s.add("bob".to_string());
+        s.add("carol".to_string());
+        let _removed = s.remove(&"bob".to_string());
+        let json = serde_json::to_string(&s).expect("serialize");
+        let decoded: ORSet<String> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn test_or_set_round_trip_preserves_contains_and_len() {
+        // Defense-in-depth: PartialEq is one signal; explicitly
+        // pin the API surface (contains / len / is_empty) on
+        // the round-tripped value.
+        let mut s: ORSet<String> = ORSet::new("node-z");
+        for n in 0..5 {
+            s.add(format!("element-{n}"));
+        }
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: ORSet<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.len(), 5);
+        for n in 0..5 {
+            assert!(decoded.contains(&format!("element-{n}")));
+        }
+        assert!(!decoded.is_empty());
+    }
+
+    #[test]
+    fn test_or_set_empty_round_trips() {
+        // Boundary: an empty OR-Set serializes and deserializes
+        // without losing the node_id.
+        let s: ORSet<String> = ORSet::new("node-empty");
+        let json = serde_json::to_string(&s).unwrap();
+        let decoded: ORSet<String> = serde_json::from_str(&json).unwrap();
+        assert!(decoded.is_empty());
+        assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn test_or_set_round_trip_then_merge_converges() {
+        // CRDT-flavored property: if a replica receives a
+        // serialized OR-Set, deserializes it, and merges it
+        // into its own, the result is equivalent to merging
+        // the original directly. Wire-transmissible CRDT
+        // semantics pinned end-to-end.
+        let mut a: ORSet<String> = ORSet::new("node-a");
+        a.add("x".to_string());
+        let mut b: ORSet<String> = ORSet::new("node-b");
+        b.add("y".to_string());
+        let json = serde_json::to_string(&b).unwrap();
+        let decoded_b: ORSet<String> = serde_json::from_str(&json).unwrap();
+        let mut a_via_wire = a.clone();
+        a_via_wire.merge(&decoded_b);
+        let mut a_direct = a.clone();
+        a_direct.merge(&b);
+        // The two replicas converge to the same state
+        // regardless of whether b traveled over the wire.
+        assert_eq!(a_via_wire, a_direct);
     }
 }
