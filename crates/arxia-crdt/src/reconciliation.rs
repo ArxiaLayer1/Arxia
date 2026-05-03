@@ -773,4 +773,108 @@ mod tests {
         assert_eq!(report.balances[alice.id()], 1_000_000);
         assert!(report.rejected_genesis.is_empty());
     }
+
+    // ============================================================
+    // MED-017 (commit 059) — RECEIVE balance regression pinned
+    // by explicit tests. Credit comes from source.amount, not
+    // block.balance. Inheritance-closed by commit 011's design.
+    // ============================================================
+
+    fn forge_receive_with_arbitrary_balance(
+        receiver: &mut AccountChain,
+        send_block: &Block,
+        previous: String,
+        nonce: u64,
+        forged_balance: u64,
+    ) -> Block {
+        let timestamp = arxia_core::now_millis();
+        let block_type = BlockType::Receive {
+            source_hash: send_block.hash.clone(),
+        };
+        let hash = Block::compute_hash(
+            receiver.id(),
+            &previous,
+            &block_type,
+            forged_balance,
+            nonce,
+            timestamp,
+        )
+        .expect("test helper: canonical BlockType always serializes");
+        let hash_bytes = hex::decode(&hash).expect("test helper: blake3 hex");
+        let signature = receiver.signing_key().sign(&hash_bytes).to_bytes().to_vec();
+        Block {
+            account: receiver.id().to_string(),
+            previous,
+            block_type,
+            balance: forged_balance,
+            nonce,
+            timestamp,
+            hash,
+            signature,
+        }
+    }
+
+    #[test]
+    fn test_reconcile_credits_from_source_amount_not_receive_balance() {
+        // PRIMARY MED-017 PIN: a RECEIVE with a forged
+        // `balance = 0` still credits by source.amount.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(10_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        let send = alice.send(bob.id(), 5_000_000, &mut vc).unwrap();
+        let prev_hash = bob.chain.last().map(|b| b.hash.clone()).unwrap_or_default();
+        let next_nonce = bob.nonce + 1;
+        let forged =
+            forge_receive_with_arbitrary_balance(&mut bob, &send, prev_hash, next_nonce, 0);
+        let report = reconcile_partitions(&alice.chain, &[forged]).unwrap();
+        assert_eq!(report.balances[bob.id()], 5_000_000);
+        assert!(report.rejected_receives.is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_ignores_inflated_receive_balance() {
+        // Symmetric: forged inflation also ignored.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(10_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        let send = alice.send(bob.id(), 5_000_000, &mut vc).unwrap();
+        let prev_hash = bob.chain.last().map(|b| b.hash.clone()).unwrap_or_default();
+        let next_nonce = bob.nonce + 1;
+        let forged = forge_receive_with_arbitrary_balance(
+            &mut bob,
+            &send,
+            prev_hash,
+            next_nonce,
+            999_000_000,
+        );
+        let report = reconcile_partitions(&alice.chain, &[forged]).unwrap();
+        assert_eq!(report.balances[bob.id()], 5_000_000);
+    }
+
+    #[test]
+    fn test_reconcile_no_panic_on_balance_regression_attempt() {
+        // Pre-011 underflow path absent ; current code reads
+        // source.amount unconditionally.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(10_000_000, &mut vc).unwrap();
+        bob.open(100, &mut vc).unwrap();
+        let send = alice.send(bob.id(), 5_000_000, &mut vc).unwrap();
+        let prev_hash = bob.chain.last().map(|b| b.hash.clone()).unwrap_or_default();
+        let next_nonce = bob.nonce + 1;
+        let forged =
+            forge_receive_with_arbitrary_balance(&mut bob, &send, prev_hash, next_nonce, 0);
+        // Include bob's full chain (his Open at nonce=1) PLUS
+        // the forged receive — so reconciliation sees both.
+        let mut partition_b = bob.chain.clone();
+        partition_b.push(forged);
+        let report = reconcile_partitions(&alice.chain, &partition_b).unwrap();
+        // bob: 100 (open) + 5_000_000 (receive) = 5_000_100
+        assert_eq!(report.balances[bob.id()], 5_000_100);
+    }
 }
