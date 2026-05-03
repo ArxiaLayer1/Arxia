@@ -156,7 +156,14 @@ impl AccountChain {
             timestamp,
         )?;
         // CRITICAL: sign raw Blake3 bytes (32 bytes), NOT hex string
-        let hash_bytes = hex::decode(&hash).expect("valid hex hash");
+        // MED-002 (commit 055): typed-error on internal hex
+        // decode. `compute_hash` (commit 050) returns a
+        // 64-char lowercase hex string by construction; the
+        // decode is unreachable today. Defense-in-depth: a
+        // future refactor that swaps the hash algorithm or
+        // its formatting surfaces the failure as
+        // `HexDecode` instead of an `unwrap` panic.
+        let hash_bytes = hex::decode(&hash).map_err(ArxiaError::HexDecode)?;
         let signature = self.signing_key.sign(&hash_bytes);
         let block = Block {
             account: self.public_key_hex.clone(),
@@ -229,7 +236,14 @@ impl AccountChain {
             self.nonce,
             timestamp,
         )?;
-        let hash_bytes = hex::decode(&hash).expect("valid hex hash");
+        // MED-002 (commit 055): typed-error on internal hex
+        // decode. `compute_hash` (commit 050) returns a
+        // 64-char lowercase hex string by construction; the
+        // decode is unreachable today. Defense-in-depth: a
+        // future refactor that swaps the hash algorithm or
+        // its formatting surfaces the failure as
+        // `HexDecode` instead of an `unwrap` panic.
+        let hash_bytes = hex::decode(&hash).map_err(ArxiaError::HexDecode)?;
         let signature = self.signing_key.sign(&hash_bytes);
         let block = Block {
             account: self.public_key_hex.clone(),
@@ -313,7 +327,14 @@ impl AccountChain {
             self.nonce,
             timestamp,
         )?;
-        let hash_bytes = hex::decode(&hash).expect("valid hex hash");
+        // MED-002 (commit 055): typed-error on internal hex
+        // decode. `compute_hash` (commit 050) returns a
+        // 64-char lowercase hex string by construction; the
+        // decode is unreachable today. Defense-in-depth: a
+        // future refactor that swaps the hash algorithm or
+        // its formatting surfaces the failure as
+        // `HexDecode` instead of an `unwrap` panic.
+        let hash_bytes = hex::decode(&hash).map_err(ArxiaError::HexDecode)?;
         let signature = self.signing_key.sign(&hash_bytes);
         let block = Block {
             account: self.public_key_hex.clone(),
@@ -896,6 +917,29 @@ mod tests {
         assert!(
             !matches!(result, Err(ArxiaError::SelfSendNotAllowed)),
             "destination one byte different from self must not trigger SelfSendNotAllowed"
+        );
+    }
+
+    // ============================================================
+    // MED-002 (commit 055) — typed-error on internal hex decode.
+    // ============================================================
+
+    #[test]
+    fn test_chain_rs_no_unguarded_expect_on_hex_decode() {
+        // STRUCTURAL PIN: production code must NOT contain
+        // `.expect("valid hex hash")`. Source-lint via
+        // include_str!. A future regression reintroducing the
+        // panic-prone form fails this test before reaching CI.
+        const SELF_SOURCE: &str = include_str!("chain.rs");
+        let test_marker = "#[cfg(test)]\nmod tests";
+        let production = SELF_SOURCE
+            .split(test_marker)
+            .next()
+            .expect("split always yields >=1 segment");
+        assert!(
+            !production.contains(".expect(\"valid hex hash\")"),
+            "MED-002: production code must use `?` propagation \
+             for internal hex::decode failures"
         );
     }
 }

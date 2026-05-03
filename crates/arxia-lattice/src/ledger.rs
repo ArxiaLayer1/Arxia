@@ -229,7 +229,7 @@ mod tests {
             timestamp,
         )
         .expect("test helper: canonical BlockType always serializes");
-        let hash_bytes = hex::decode(&hash).expect("valid hex hash");
+        let hash_bytes = hex::decode(&hash).expect("test helper: blake3 hex always decodes");
         let signature = alice.signing_key().sign(&hash_bytes);
         Block {
             account: alice.id().to_string(),
