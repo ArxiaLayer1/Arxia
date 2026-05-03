@@ -54,8 +54,16 @@ impl<T: Ord + Eq + Clone> ORSet<T> {
         }
     }
     /// Add an element with a unique tag.
+    ///
+    /// MED-013 (commit 057): uses `saturating_add` instead of
+    /// `+=` to defend against `u64::MAX` wrap. At wrap, the
+    /// counter sticks at `u64::MAX` and subsequent adds reuse
+    /// the last tag — duplicate-tag detection is up to the
+    /// `BTreeSet` (which dedups via `insert`). Practical
+    /// wrap-time on a single node is ~292 billion years at
+    /// 1 add/ns; defense-in-depth only.
     pub fn add(&mut self, element: T) {
-        self.tag_counter += 1;
+        self.tag_counter = self.tag_counter.saturating_add(1);
         let tag = format!("{}:{}", self.node_id, self.tag_counter);
         self.elements.entry(element).or_default().insert(tag);
     }
@@ -236,5 +244,68 @@ mod tests {
         // The two replicas converge to the same state
         // regardless of whether b traveled over the wire.
         assert_eq!(a_via_wire, a_direct);
+    }
+
+    // ============================================================
+    // MED-013 (commit 057) — tag_counter saturating_add defends
+    // against u64::MAX wrap.
+    // ============================================================
+
+    /// Build an OR-Set with the tag counter pre-loaded close
+    /// to u64::MAX. Used by the saturating-arithmetic tests
+    /// without spinning 2^64 iterations.
+    fn or_set_at_counter(node: &str, start: u64) -> ORSet<String> {
+        // Fields are private; serde round-trip from a
+        // manually-constructed JSON is the in-test pre-load
+        // path.
+        let json = format!(
+            r#"{{"elements":{{}},"tag_counter":{},"node_id":"{}"}}"#,
+            start, node
+        );
+        serde_json::from_str(&json).expect("manually-built ORSet json")
+    }
+
+    #[test]
+    fn test_tag_counter_saturates_at_u64_max() {
+        // PRIMARY MED-013 PIN: an OR-Set whose counter has
+        // somehow reached u64::MAX must NOT panic on add. The
+        // counter saturates and subsequent adds reuse the
+        // last tag (BTreeSet dedups). State remains consistent.
+        let mut s = or_set_at_counter("node-overflow", u64::MAX);
+        // The first add should NOT panic (the +=  in the
+        // pre-fix version would).
+        s.add("alice".to_string());
+        // Counter saturated.
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(&format!("{}", u64::MAX)));
+        assert!(s.contains(&"alice".to_string()));
+    }
+
+    #[test]
+    fn test_tag_counter_increments_normally_when_far_from_wrap() {
+        // Regression: the saturating change doesn't break the
+        // common case of counter incrementing 0 → 1 → 2 ...
+        let mut s: ORSet<String> = ORSet::new("node-a");
+        for i in 0..5 {
+            s.add(format!("e-{i}"));
+        }
+        // Round-trip and pin the counter at exactly 5.
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"tag_counter\":5"));
+    }
+
+    #[test]
+    fn test_tag_counter_just_below_max_saturates_on_one_add() {
+        // Boundary: counter = u64::MAX - 1, one add brings it
+        // to u64::MAX (no saturation triggered yet, just the
+        // last representable value).
+        let mut s = or_set_at_counter("node-edge", u64::MAX - 1);
+        s.add("x".to_string());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(&format!("\"tag_counter\":{}", u64::MAX)));
+        // One more add — saturates (no panic).
+        s.add("y".to_string());
+        let json2 = serde_json::to_string(&s).unwrap();
+        assert!(json2.contains(&format!("\"tag_counter\":{}", u64::MAX)));
     }
 }
