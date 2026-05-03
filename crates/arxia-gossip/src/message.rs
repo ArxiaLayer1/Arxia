@@ -39,6 +39,19 @@ use serde::{Deserialize, Serialize};
 /// [`GossipMessage::validate`] before any signature work runs.
 pub const MAX_BLOCK_ANNOUNCE_BYTES: usize = 193 * 64;
 
+/// Maximum initial value of [`GossipMessage::BlockAnnounce::hops`].
+///
+/// MED-008 (commit 056) — pre-fix `hops` was caller-controlled
+/// with no upper bound; a block could circulate forever as
+/// `hops = 255`. The cap rejects oversized initial values and
+/// pairs with [`GossipMessage::decrement_hops_for_relay`]
+/// (relayer-side TTL helper).
+///
+/// Set at 16 — well above realistic mesh depths and well below
+/// `u8::MAX`. Same value as `arxia_relay::receipt::MAX_HOPS_PER_RECEIPT`
+/// (HIGH-014).
+pub const MAX_BLOCK_ANNOUNCE_HOPS: u8 = 16;
+
 /// Maximum number of entries in a [`GossipMessage::NonceSyncResponse::entries`]
 /// payload. Aligned with [`crate::MAX_NONCE_REGISTRY_ENTRIES`] (the
 /// receiver's bounded local registry, commit 020): a peer cannot
@@ -77,6 +90,15 @@ pub enum MessageError {
         /// Configured cap ([`MAX_NONCE_SYNC_RESPONSE_ENTRIES`]).
         max: usize,
     },
+    /// `BlockAnnounce::hops` exceeds [`MAX_BLOCK_ANNOUNCE_HOPS`].
+    /// MED-008: rejected at validate() time so a flooding-prone
+    /// initial value never enters the gossip pipeline.
+    BlockAnnounceHopsExceeded {
+        /// Actual `hops` value.
+        hops: u8,
+        /// Configured cap ([`MAX_BLOCK_ANNOUNCE_HOPS`]).
+        max: u8,
+    },
 }
 
 impl std::fmt::Display for MessageError {
@@ -92,6 +114,9 @@ impl std::fmt::Display for MessageError {
                 "NonceSyncResponse.entries count {} exceeds cap {}",
                 count, max
             ),
+            Self::BlockAnnounceHopsExceeded { hops, max } => {
+                write!(f, "BlockAnnounce.hops {} exceeds cap {}", hops, max)
+            }
         }
     }
 }
@@ -140,7 +165,13 @@ impl GossipMessage {
     /// without invoking expensive cryptography.
     pub fn validate(&self) -> Result<(), MessageError> {
         match self {
-            Self::BlockAnnounce { block_data, .. } => {
+            Self::BlockAnnounce { block_data, hops } => {
+                if *hops > MAX_BLOCK_ANNOUNCE_HOPS {
+                    return Err(MessageError::BlockAnnounceHopsExceeded {
+                        hops: *hops,
+                        max: MAX_BLOCK_ANNOUNCE_HOPS,
+                    });
+                }
                 if block_data.len() > MAX_BLOCK_ANNOUNCE_BYTES {
                     return Err(MessageError::BlockAnnounceTooLarge {
                         size: block_data.len(),
@@ -159,6 +190,39 @@ impl GossipMessage {
                 Ok(())
             }
             Self::NonceSyncRequest { .. } | Self::Ping { .. } => Ok(()),
+        }
+    }
+
+    /// Decrement the `hops` field on a `BlockAnnounce` and report
+    /// whether the message can still be forwarded.
+    ///
+    /// MED-008 (commit 056) — relayer-side TTL helper. The
+    /// canonical relayer flow:
+    ///
+    /// ```text
+    /// receive(msg) → validate() → decrement_hops_for_relay() → broadcast if true
+    /// ```
+    ///
+    /// Returns `true` iff the caller may relay the message:
+    /// - Pre-decrement `hops > 0` AND post-decrement `hops > 0`.
+    /// - For non-`BlockAnnounce` variants, returns `false`
+    ///   (other message types are not relay-decremented).
+    ///
+    /// Returns `false` (and does NOT decrement) when:
+    /// - Pre-decrement `hops == 0` (terminal — block has expired
+    ///   its TTL; this receiver can ingest it but must not
+    ///   re-broadcast).
+    /// - Variant is not `BlockAnnounce`.
+    pub fn decrement_hops_for_relay(&mut self) -> bool {
+        match self {
+            Self::BlockAnnounce { hops, .. } => {
+                if *hops == 0 {
+                    return false;
+                }
+                *hops -= 1;
+                *hops > 0
+            }
+            _ => false,
         }
     }
 }
@@ -329,5 +393,129 @@ mod tests {
             "Display should surface cap: {}",
             s
         );
+    }
+
+    // ============================================================
+    // MED-008 (commit 056) — BlockAnnounce hops cap +
+    // decrement-on-relay TTL helper.
+    // ============================================================
+
+    #[test]
+    fn test_max_block_announce_hops_constant() {
+        // Pin: 16 (parallel to MAX_HOPS_PER_RECEIPT in
+        // arxia-relay).
+        assert_eq!(MAX_BLOCK_ANNOUNCE_HOPS, 16);
+    }
+
+    #[test]
+    fn test_validate_rejects_hops_above_cap() {
+        // PRIMARY MED-008 PIN: a flooding-prone initial value
+        // is rejected at the cheapest gate (validate, before
+        // crypto).
+        let m = GossipMessage::BlockAnnounce {
+            block_data: vec![0u8; 100],
+            hops: 255,
+        };
+        let err = m.validate().expect_err("hops=255 must reject");
+        match err {
+            MessageError::BlockAnnounceHopsExceeded { hops, max } => {
+                assert_eq!(hops, 255);
+                assert_eq!(max, MAX_BLOCK_ANNOUNCE_HOPS);
+            }
+            other => panic!("expected BlockAnnounceHopsExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_hops_at_max() {
+        // Boundary inclusive: hops == MAX is accepted.
+        let m = GossipMessage::BlockAnnounce {
+            block_data: vec![0u8; 100],
+            hops: MAX_BLOCK_ANNOUNCE_HOPS,
+        };
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_hops_zero_terminal_block() {
+        // Boundary: hops == 0 (terminal block) is accepted by
+        // validate. The receiver may still ingest the block;
+        // only the relayer's decrement_hops_for_relay refuses
+        // to forward it.
+        let m = GossipMessage::BlockAnnounce {
+            block_data: vec![0u8; 100],
+            hops: 0,
+        };
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_hops_check_fires_before_block_data_check() {
+        // Order pin: hops cap is the first check in validate.
+        // An oversized AND over-hopped message returns
+        // HopsExceeded, not BlockAnnounceTooLarge — pinned for
+        // log clarity.
+        let m = GossipMessage::BlockAnnounce {
+            block_data: vec![0u8; MAX_BLOCK_ANNOUNCE_BYTES + 1],
+            hops: 255,
+        };
+        let err = m.validate().unwrap_err();
+        assert!(
+            matches!(err, MessageError::BlockAnnounceHopsExceeded { .. }),
+            "expected hops-cap diagnostic first, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_decrement_hops_decrements_and_returns_relayability() {
+        let mut m = GossipMessage::BlockAnnounce {
+            block_data: vec![0u8; 100],
+            hops: 3,
+        };
+        // Decrement 3 → 2: still relayable.
+        assert!(m.decrement_hops_for_relay());
+        if let GossipMessage::BlockAnnounce { hops, .. } = &m {
+            assert_eq!(*hops, 2);
+        }
+        // 2 → 1: still relayable.
+        assert!(m.decrement_hops_for_relay());
+        // 1 → 0: NOT relayable (post-decrement is 0).
+        assert!(!m.decrement_hops_for_relay());
+        if let GossipMessage::BlockAnnounce { hops, .. } = &m {
+            assert_eq!(*hops, 0);
+        }
+    }
+
+    #[test]
+    fn test_decrement_hops_returns_false_when_already_zero() {
+        // Pre-decrement hops == 0: don't decrement (no
+        // u8-wrap-to-255), don't relay.
+        let mut m = GossipMessage::BlockAnnounce {
+            block_data: vec![0u8; 100],
+            hops: 0,
+        };
+        assert!(!m.decrement_hops_for_relay());
+        if let GossipMessage::BlockAnnounce { hops, .. } = &m {
+            assert_eq!(*hops, 0, "no wrap-to-255 on already-zero hops");
+        }
+    }
+
+    #[test]
+    fn test_decrement_hops_returns_false_for_non_block_announce() {
+        // Other variants aren't relay-decremented; helper
+        // returns false sentinel.
+        let mut m = GossipMessage::Ping {
+            node_id: "n1".to_string(),
+            timestamp: 0,
+        };
+        assert!(!m.decrement_hops_for_relay());
+    }
+
+    #[test]
+    fn test_block_announce_hops_exceeded_display_format() {
+        let e = MessageError::BlockAnnounceHopsExceeded { hops: 99, max: 16 };
+        let s = format!("{e}");
+        assert!(s.contains("99"));
+        assert!(s.contains("16"));
     }
 }
