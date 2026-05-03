@@ -23,9 +23,15 @@ impl VectorClock {
     }
 
     /// Increment the clock for the given node.
+    ///
+    /// MED-018 (commit 060): uses `saturating_add` to defend
+    /// against `u64::MAX` wrap. At wrap, counter sticks at
+    /// `u64::MAX` ; subsequent ticks are no-ops. Practical
+    /// wrap-time is ~292 billion years at 1 tick/ns —
+    /// defense-in-depth only.
     pub fn tick(&mut self, node_id: &str) {
         let counter = self.clocks.entry(node_id.to_string()).or_insert(0);
-        *counter += 1;
+        *counter = counter.saturating_add(1);
     }
 
     /// Merge with another vector clock (element-wise max).
@@ -941,5 +947,48 @@ mod tests {
             "MED-002: production code must use `?` propagation \
              for internal hex::decode failures"
         );
+    }
+
+    // ============================================================
+    // MED-018 (commit 060) — VectorClock tick saturating_add
+    // defends against u64::MAX wrap.
+    // ============================================================
+
+    #[test]
+    fn test_vector_clock_tick_saturates_at_u64_max() {
+        // PRIMARY MED-018 PIN: a vector clock counter pre-loaded
+        // at u64::MAX must NOT panic on tick.
+        let mut vc = VectorClock::new();
+        vc.clocks.insert("node-overflow".to_string(), u64::MAX);
+        vc.tick("node-overflow"); // must not panic
+        assert_eq!(vc.clocks["node-overflow"], u64::MAX);
+        // Repeated ticks remain at the saturated value.
+        vc.tick("node-overflow");
+        assert_eq!(vc.clocks["node-overflow"], u64::MAX);
+    }
+
+    #[test]
+    fn test_vector_clock_tick_increments_normally_when_far_from_wrap() {
+        // Regression: the saturating change doesn't break the
+        // common case.
+        let mut vc = VectorClock::new();
+        for _ in 0..10 {
+            vc.tick("node-a");
+        }
+        assert_eq!(vc.clocks["node-a"], 10);
+    }
+
+    #[test]
+    fn test_vector_clock_tick_just_below_max_saturates_on_one_tick() {
+        // Boundary: counter = u64::MAX - 1, one tick brings
+        // it to u64::MAX (no saturation triggered yet, just
+        // the last representable value).
+        let mut vc = VectorClock::new();
+        vc.clocks.insert("node-edge".to_string(), u64::MAX - 1);
+        vc.tick("node-edge");
+        assert_eq!(vc.clocks["node-edge"], u64::MAX);
+        // Next tick saturates.
+        vc.tick("node-edge");
+        assert_eq!(vc.clocks["node-edge"], u64::MAX);
     }
 }
