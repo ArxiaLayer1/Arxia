@@ -55,6 +55,23 @@ pub struct RejectedReceive {
     pub reason: &'static str,
 }
 
+/// Info on a `BlockType::Open` block that was rejected because it
+/// claimed a non-genesis nonce. Genesis MUST be `nonce == 1`
+/// (per HIGH-003 / commit 031); reconciliation refuses to credit
+/// any `Open` at a different nonce. MED-016 (commit 058) defense.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedGenesis {
+    /// Hex-encoded account public key.
+    pub account: String,
+    /// The (non-genesis) nonce the Open block claimed.
+    pub nonce: u64,
+    /// Hash of the rejected Open block.
+    pub block_hash: String,
+    /// Why the rejection happened — currently always
+    /// `"open_at_non_genesis_nonce"`.
+    pub reason: &'static str,
+}
+
 /// Full outcome of a `reconcile_partitions` call.
 #[derive(Debug, Clone)]
 pub struct ReconciliationReport {
@@ -65,6 +82,9 @@ pub struct ReconciliationReport {
     /// RECEIVE blocks that could not be matched to an applied SEND and
     /// therefore did NOT credit the receiver.
     pub rejected_receives: Vec<RejectedReceive>,
+    /// `Open` blocks that claimed a non-genesis nonce and were
+    /// therefore not applied. MED-016 (commit 058).
+    pub rejected_genesis: Vec<RejectedGenesis>,
 }
 
 /// Reconcile two partitions into merged balances via PNCounter CRDT.
@@ -134,12 +154,27 @@ pub fn reconcile_partitions(
     //    by (account, nonce).
     let mut crdts: HashMap<String, PNCounter> = HashMap::new();
     let mut rejected_receives: Vec<RejectedReceive> = Vec::new();
+    let mut rejected_genesis: Vec<RejectedGenesis> = Vec::new();
     let mut ordered_keys: Vec<(String, u64)> = by_key.keys().cloned().collect();
     ordered_keys.sort();
     for key in ordered_keys {
         let block = winners.get(&key).expect("winner recorded per key");
         match &block.block_type {
             BlockType::Open { initial_balance } => {
+                // MED-016 (commit 058): genesis Open blocks MUST
+                // be at nonce == 1. A forged Open at any other
+                // nonce (notably 0) does NOT credit the account.
+                // Parallels HIGH-003 / commit 031 which enforces
+                // the same rule at `Ledger::add_block`.
+                if block.nonce != 1 {
+                    rejected_genesis.push(RejectedGenesis {
+                        account: block.account.clone(),
+                        nonce: block.nonce,
+                        block_hash: block.hash.clone(),
+                        reason: "open_at_non_genesis_nonce",
+                    });
+                    continue;
+                }
                 crdts
                     .entry(block.account.clone())
                     .or_default()
@@ -224,6 +259,7 @@ pub fn reconcile_partitions(
         balances,
         conflicts,
         rejected_receives,
+        rejected_genesis,
     })
 }
 
@@ -240,6 +276,7 @@ pub fn reconcile_partitions_balances_only(
 mod tests {
     use super::*;
     use arxia_lattice::chain::{AccountChain, VectorClock};
+    use ed25519_dalek::Signer;
 
     // ========================================================================
     // Baseline tests (inherited from 007)
@@ -660,5 +697,80 @@ mod tests {
         for rr in &report.rejected_receives {
             assert_eq!(rr.reason, "source_not_found");
         }
+    }
+
+    // ============================================================
+    // MED-016 (commit 058) — reconcile_partitions rejects Open
+    // blocks at non-genesis nonces. Genesis is nonce==1; any
+    // other nonce on an Open is a forged block and MUST NOT
+    // credit the account.
+    // ============================================================
+
+    /// Forge an Open block at an attacker-chosen nonce. The
+    /// signature is valid (attacker holds the key) and the
+    /// hash is correctly computed; only the nonce is anomalous.
+    fn forge_open_at_nonce(account: &mut AccountChain, nonce: u64) -> Block {
+        let timestamp = arxia_core::now_millis();
+        let block_type = BlockType::Open {
+            initial_balance: 999_999,
+        };
+        let hash = Block::compute_hash(account.id(), "", &block_type, 999_999, nonce, timestamp)
+            .expect("test helper: canonical BlockType always serializes");
+        let hash_bytes = hex::decode(&hash).expect("test helper: blake3 hex");
+        let signature = account.signing_key().sign(&hash_bytes).to_bytes().to_vec();
+        Block {
+            account: account.id().to_string(),
+            previous: String::new(),
+            block_type,
+            balance: 999_999,
+            nonce,
+            timestamp,
+            hash,
+            signature,
+        }
+    }
+
+    #[test]
+    fn test_reconcile_rejects_open_at_nonce_zero() {
+        // PRIMARY MED-016 PIN: a forged Open block at nonce 0
+        // does NOT credit the account.
+        let mut alice = AccountChain::new();
+        let forged = forge_open_at_nonce(&mut alice, 0);
+        let forged_hash = forged.hash.clone();
+        let report = reconcile_partitions(std::slice::from_ref(&forged), &[]).unwrap();
+        // No balance credit.
+        let bal = report.balances.get(alice.id()).copied().unwrap_or(0);
+        assert_eq!(bal, 0);
+        // Rejection surfaced.
+        assert_eq!(report.rejected_genesis.len(), 1);
+        assert_eq!(report.rejected_genesis[0].nonce, 0);
+        assert_eq!(
+            report.rejected_genesis[0].reason,
+            "open_at_non_genesis_nonce"
+        );
+        assert_eq!(report.rejected_genesis[0].block_hash, forged_hash);
+    }
+
+    #[test]
+    fn test_reconcile_rejects_open_at_nonce_two() {
+        // Boundary: any non-1 nonce, including the seemingly
+        // innocuous 2, is rejected.
+        let mut alice = AccountChain::new();
+        let forged = forge_open_at_nonce(&mut alice, 2);
+        let report = reconcile_partitions(&[forged], &[]).unwrap();
+        assert_eq!(report.balances.get(alice.id()).copied().unwrap_or(0), 0);
+        assert_eq!(report.rejected_genesis.len(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_accepts_open_at_genesis_nonce() {
+        // Regression positive: genuine genesis (nonce=1) still
+        // credits the account.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        let report = reconcile_partitions(&alice.chain, &[]).unwrap();
+        assert_eq!(report.balances[alice.id()], 1_000_000);
+        assert!(report.rejected_genesis.is_empty());
     }
 }
