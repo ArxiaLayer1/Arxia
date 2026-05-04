@@ -40,6 +40,18 @@ pub const DEFAULT_INBOX_CAPACITY: usize = 1024;
 /// the caller can implement explicit back-pressure handling.
 pub const DEFAULT_OUTBOX_CAPACITY: usize = 1024;
 
+/// Default seed for the deterministic xorshift64 PRNG used by
+/// [`SimulatedTransport`] to simulate packet loss.
+///
+/// MED-007 (commit 067): the seed is now a named constant and
+/// can be overridden via [`SimulatedTransport::with_seed`] /
+/// [`SimulatedTransport::with_capacity_and_seed`]. Tests that
+/// need to exercise a specific loss pattern can pin the seed ;
+/// tests that need divergent patterns can vary it. The default
+/// value preserves the historical behaviour for callers that
+/// don't override.
+pub const DEFAULT_PRNG_SEED: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
 /// Deterministic xorshift64 PRNG for reproducible packet loss simulation.
 fn xorshift64(state: &mut u64) -> u64 {
     let mut x = *state;
@@ -98,6 +110,50 @@ impl SimulatedTransport {
         inbox_capacity: usize,
         outbox_capacity: usize,
     ) -> Self {
+        Self::with_capacity_and_seed(
+            latency_ms,
+            loss_rate,
+            mtu,
+            inbox_capacity,
+            outbox_capacity,
+            DEFAULT_PRNG_SEED,
+        )
+    }
+
+    /// Create a simulated transport with a caller-supplied PRNG seed
+    /// and the default inbox/outbox capacities.
+    ///
+    /// MED-007 (commit 067): tests that need to exercise a specific
+    /// loss pattern can pin the seed (e.g. via property testing) ;
+    /// tests that need divergent patterns across runs can vary it
+    /// without forking the constructor. Default callers continue to
+    /// use [`DEFAULT_PRNG_SEED`] via [`SimulatedTransport::new`] /
+    /// [`SimulatedTransport::with_capacity`].
+    pub fn with_seed(latency_ms: u64, loss_rate: f64, mtu: usize, seed: u64) -> Self {
+        Self::with_capacity_and_seed(
+            latency_ms,
+            loss_rate,
+            mtu,
+            DEFAULT_INBOX_CAPACITY,
+            DEFAULT_OUTBOX_CAPACITY,
+            seed,
+        )
+    }
+
+    /// Create a simulated transport with both custom capacities AND a
+    /// caller-supplied PRNG seed.
+    ///
+    /// MED-007 (commit 067): full-control constructor. All other
+    /// constructors (`new`, `with_capacity`, `with_seed`, `lora`,
+    /// `ble`) delegate here.
+    pub fn with_capacity_and_seed(
+        latency_ms: u64,
+        loss_rate: f64,
+        mtu: usize,
+        inbox_capacity: usize,
+        outbox_capacity: usize,
+        seed: u64,
+    ) -> Self {
         Self {
             inbox: VecDeque::new(),
             scheduled_inbox: VecDeque::new(),
@@ -108,7 +164,16 @@ impl SimulatedTransport {
             latency_ms,
             loss_rate,
             mtu,
-            rng_state: 0xDEAD_BEEF_CAFE_BABE,
+            // Coerce 0 → DEFAULT_PRNG_SEED: xorshift64 has the
+            // pathological fixed point at state 0 (all subsequent
+            // outputs would be 0). A 0 seed would make every
+            // call to xorshift64 return 0 and every loss check
+            // would compare `0 < threshold` — i.e. the
+            // simulation would lose every message at any
+            // non-zero loss_rate. Silent coercion keeps the
+            // invariant of a non-degenerate PRNG and matches the
+            // capacity-coercion-to-1 pattern.
+            rng_state: if seed == 0 { DEFAULT_PRNG_SEED } else { seed },
         }
     }
 
@@ -220,6 +285,15 @@ impl SimulatedTransport {
     /// latency-respecting inbox (not yet due).
     pub fn scheduled_inbox_len(&self) -> usize {
         self.scheduled_inbox.len()
+    }
+
+    /// Current xorshift64 PRNG state.
+    ///
+    /// MED-007 (commit 067): exposed for test inspection so a
+    /// caller can verify the PRNG advanced (or didn't) over a
+    /// known sequence of `send` calls.
+    pub fn rng_state(&self) -> u64 {
+        self.rng_state
     }
 }
 
@@ -545,5 +619,97 @@ mod tests {
         assert_eq!(t.scheduled_inbox_len(), 1);
         let _ = t.try_recv_at(1600);
         assert_eq!(t.scheduled_inbox_len(), 0);
+    }
+
+    // ============================================================
+    // MED-007 (commit 067) — caller-supplied PRNG seed.
+    // The pre-fix `with_capacity` hard-coded the seed to
+    // `0xDEAD_BEEF_CAFE_BABE` ; tests that needed divergent loss
+    // patterns had to fork the constructor. New `with_seed` and
+    // `with_capacity_and_seed` constructors plus a `rng_state()`
+    // getter close that gap.
+    // ============================================================
+
+    #[test]
+    fn test_default_prng_seed_constant_pinned() {
+        // PRIMARY MED-007 PIN: the symbolic default matches the
+        // historical hard-coded value. Future refactors changing
+        // it (e.g. to 0 — which would be the xorshift64 fixed
+        // point) fail this test.
+        assert_eq!(DEFAULT_PRNG_SEED, 0xDEAD_BEEF_CAFE_BABE);
+    }
+
+    #[test]
+    fn test_with_seed_initializes_rng_state() {
+        // Caller-supplied seed shows up in rng_state() before
+        // any send.
+        let t = SimulatedTransport::with_seed(0, 0.0, 256, 0x1234_5678);
+        assert_eq!(t.rng_state(), 0x1234_5678);
+    }
+
+    #[test]
+    fn test_zero_seed_coerces_to_default_to_avoid_xorshift_fixed_point() {
+        // Edge: seed == 0 silently coerces to DEFAULT_PRNG_SEED
+        // because xorshift64 has its pathological fixed point
+        // at state 0. Pins the documented invariant.
+        let t = SimulatedTransport::with_seed(0, 0.0, 256, 0);
+        assert_eq!(t.rng_state(), DEFAULT_PRNG_SEED);
+    }
+
+    #[test]
+    fn test_default_constructor_uses_default_seed() {
+        // Backward-compat: pre-067 callers using ::new keep the
+        // same starting rng_state.
+        let t = SimulatedTransport::new(0, 0.0, 256);
+        assert_eq!(t.rng_state(), DEFAULT_PRNG_SEED);
+    }
+
+    #[test]
+    fn test_same_seed_produces_identical_loss_pattern() {
+        // Reproducibility: two transports with the same seed and
+        // loss_rate must produce the same sequence of
+        // MessageLost / Ok results over the same input.
+        let make = || SimulatedTransport::with_seed(0, 0.5, 256, 0xCAFE_F00D);
+        let mut a = make();
+        let mut b = make();
+        let mut a_results: Vec<bool> = Vec::new();
+        let mut b_results: Vec<bool> = Vec::new();
+        for _ in 0..32 {
+            a_results.push(a.send(msg(vec![1])).is_ok());
+            b_results.push(b.send(msg(vec![1])).is_ok());
+        }
+        assert_eq!(
+            a_results, b_results,
+            "same seed must produce identical send-success pattern"
+        );
+    }
+
+    #[test]
+    fn test_different_seeds_produce_different_loss_patterns() {
+        // Different seeds → different patterns. We pick two
+        // seeds that produce divergent xorshift64 sequences
+        // and a loss_rate that exercises the threshold.
+        // (At loss_rate 0.5 the threshold is u64::MAX/2, so
+        // the high bit of each xorshift output decides loss.)
+        let mut a = SimulatedTransport::with_seed(0, 0.5, 256, 0x0123_4567_89AB_CDEF);
+        let mut b = SimulatedTransport::with_seed(0, 0.5, 256, 0xFEDC_BA98_7654_3210);
+        let mut a_results: Vec<bool> = Vec::new();
+        let mut b_results: Vec<bool> = Vec::new();
+        for _ in 0..32 {
+            a_results.push(a.send(msg(vec![1])).is_ok());
+            b_results.push(b.send(msg(vec![1])).is_ok());
+        }
+        assert_ne!(
+            a_results, b_results,
+            "different seeds must produce different patterns over a non-trivial run"
+        );
+    }
+
+    #[test]
+    fn test_with_capacity_and_seed_combines_both_overrides() {
+        let t = SimulatedTransport::with_capacity_and_seed(0, 0.0, 256, 7, 13, 0xABCD);
+        assert_eq!(t.inbox_capacity(), 7);
+        assert_eq!(t.outbox_capacity(), 13);
+        assert_eq!(t.rng_state(), 0xABCD);
     }
 }
