@@ -53,6 +53,14 @@ fn xorshift64(state: &mut u64) -> u64 {
 /// A simulated transport for testing purposes.
 pub struct SimulatedTransport {
     inbox: VecDeque<TransportMessage>,
+    /// MED-006: latency-respecting scheduled inbox. Each entry is
+    /// `(deliver_at_ms, msg)`. Populated via
+    /// [`SimulatedTransport::inject_message_with_arrival`] ;
+    /// drained via [`SimulatedTransport::try_recv_at`]. Distinct
+    /// from `inbox`, which holds latency-bypassing messages used
+    /// by the existing [`SimulatedTransport::inject_message`] /
+    /// [`SimulatedTransport::try_recv`] path.
+    scheduled_inbox: VecDeque<(u64, TransportMessage)>,
     outbox: Vec<TransportMessage>,
     inbox_capacity: usize,
     outbox_capacity: usize,
@@ -92,6 +100,7 @@ impl SimulatedTransport {
     ) -> Self {
         Self {
             inbox: VecDeque::new(),
+            scheduled_inbox: VecDeque::new(),
             outbox: Vec::new(),
             inbox_capacity: inbox_capacity.max(1),
             outbox_capacity: outbox_capacity.max(1),
@@ -163,6 +172,54 @@ impl SimulatedTransport {
     /// Saturates at [`u64::MAX`].
     pub fn inbox_dropped(&self) -> u64 {
         self.inbox_dropped
+    }
+
+    /// MED-006: latency-respecting message injection.
+    ///
+    /// Schedule `msg` for delivery at `sent_at_ms + latency_ms`.
+    /// The message is held in the scheduled inbox
+    /// until [`SimulatedTransport::try_recv_at`] is called with a
+    /// `now_ms >= sent_at_ms + latency_ms`. This is the
+    /// latency-aware alternative to the existing
+    /// [`SimulatedTransport::inject_message`] /
+    /// [`SimulatedTransport::try_recv`] pair, which deliver
+    /// instantly regardless of the configured `latency_ms`.
+    ///
+    /// `sent_at_ms.saturating_add(latency_ms)` is used so adversarial
+    /// `u64::MAX` `sent_at_ms` does not panic on overflow ; in
+    /// practice, callers pass real-clock or simulation-clock values
+    /// well below `u64::MAX − latency_ms`.
+    pub fn inject_message_with_arrival(&mut self, msg: TransportMessage, sent_at_ms: u64) {
+        let deliver_at = sent_at_ms.saturating_add(self.latency_ms);
+        self.scheduled_inbox.push_back((deliver_at, msg));
+    }
+
+    /// MED-006: latency-respecting receive.
+    ///
+    /// Returns the oldest message in
+    /// the scheduled inbox whose
+    /// `deliver_at_ms <= now_ms`, or `None` if no message is yet
+    /// due. Distinct from
+    /// [`SimulatedTransport::try_recv`] (instantaneous, ignores
+    /// latency).
+    ///
+    /// Messages are returned in FIFO arrival order — this assumes
+    /// the caller submits monotonically increasing `sent_at_ms`
+    /// values, which matches a real clock or a deterministic
+    /// simulation tick.
+    pub fn try_recv_at(&mut self, now_ms: u64) -> Option<TransportMessage> {
+        match self.scheduled_inbox.front() {
+            Some(&(deliver_at, _)) if deliver_at <= now_ms => {
+                self.scheduled_inbox.pop_front().map(|(_, m)| m)
+            }
+            _ => None,
+        }
+    }
+
+    /// Number of messages currently scheduled in the
+    /// latency-respecting inbox (not yet due).
+    pub fn scheduled_inbox_len(&self) -> usize {
+        self.scheduled_inbox.len()
     }
 }
 
@@ -389,5 +446,104 @@ mod tests {
         let s = format!("{}", e);
         assert!(s.contains("42"), "Display must surface the capacity");
         assert!(s.contains("outbox") || s.contains("full"));
+    }
+
+    // ============================================================
+    // MED-006 (commit 066) — latency-respecting injection / recv.
+    // The pre-fix `latency_ms` field was stored and exposed via
+    // `latency_ms()` but never enforced ; messages injected via
+    // `inject_message` were available immediately on `try_recv`.
+    // This pair `inject_message_with_arrival` + `try_recv_at` adds
+    // an opt-in latency-respecting path. Existing instantaneous
+    // path is untouched (backward compat).
+    // ============================================================
+
+    #[test]
+    fn test_latency_respecting_recv_returns_none_before_due() {
+        // PRIMARY MED-006 PIN: a message scheduled at t=1000 with
+        // latency 500 must NOT appear at t=1000, t=1499. It
+        // appears at t=1500. The instantaneous path
+        // (`try_recv`) is now decoupled from this scheduled
+        // path.
+        let mut t = SimulatedTransport::new(500, 0.0, 256);
+        t.inject_message_with_arrival(msg(vec![1, 2, 3]), 1000);
+        assert!(t.try_recv_at(1000).is_none(), "not due at sent_at_ms");
+        assert!(t.try_recv_at(1499).is_none(), "not due 1 ms before");
+        let m = t.try_recv_at(1500).expect("due at exactly latency");
+        assert_eq!(m.payload, vec![1, 2, 3]);
+        assert!(
+            t.try_recv_at(2000).is_none(),
+            "scheduled inbox empty after pop"
+        );
+    }
+
+    #[test]
+    fn test_latency_respecting_recv_fifo_order() {
+        // Two messages scheduled at t=1000 (deliver=1500) and
+        // t=1100 (deliver=1600). At now=1700 both are due ;
+        // first call returns the first scheduled, second call
+        // returns the second.
+        let mut t = SimulatedTransport::new(500, 0.0, 256);
+        t.inject_message_with_arrival(msg(vec![0xA]), 1000);
+        t.inject_message_with_arrival(msg(vec![0xB]), 1100);
+        let m1 = t.try_recv_at(1700).unwrap();
+        let m2 = t.try_recv_at(1700).unwrap();
+        assert_eq!(m1.payload, vec![0xA]);
+        assert_eq!(m2.payload, vec![0xB]);
+        assert!(t.try_recv_at(1700).is_none());
+    }
+
+    #[test]
+    fn test_latency_respecting_separate_from_instant_path() {
+        // Backward-compat pin: `inject_message` + `try_recv` keep
+        // their instantaneous semantics ; the new scheduled
+        // path is independent.
+        let mut t = SimulatedTransport::new(2000, 0.0, 256);
+        t.inject_message(msg(vec![0x99]));
+        t.inject_message_with_arrival(msg(vec![0xAA]), 1000);
+        // Instantaneous path: drains the legacy inbox.
+        let instant = t.try_recv().expect("instant path unaffected");
+        assert_eq!(instant.payload, vec![0x99]);
+        // Scheduled path: still waiting (latency = 2000 ms ; due at 3000).
+        assert!(t.try_recv_at(2999).is_none());
+        let scheduled = t.try_recv_at(3000).expect("scheduled now due");
+        assert_eq!(scheduled.payload, vec![0xAA]);
+    }
+
+    #[test]
+    fn test_latency_respecting_recv_zero_latency_immediate() {
+        // Edge: latency_ms == 0. Message is due at sent_at_ms.
+        // No off-by-one at the boundary.
+        let mut t = SimulatedTransport::new(0, 0.0, 256);
+        t.inject_message_with_arrival(msg(vec![0xCC]), 500);
+        assert!(t.try_recv_at(499).is_none());
+        let m = t.try_recv_at(500).unwrap();
+        assert_eq!(m.payload, vec![0xCC]);
+    }
+
+    #[test]
+    fn test_latency_respecting_inject_handles_overflow_safely() {
+        // Edge: sent_at_ms = u64::MAX with latency > 0. Without
+        // saturating_add, this would overflow. With it, the
+        // deliver_at_ms saturates to u64::MAX, and a recv at
+        // u64::MAX retrieves the message.
+        let mut t = SimulatedTransport::new(1000, 0.0, 256);
+        t.inject_message_with_arrival(msg(vec![0xDD]), u64::MAX);
+        assert!(t.try_recv_at(u64::MAX - 1).is_none());
+        let m = t.try_recv_at(u64::MAX).unwrap();
+        assert_eq!(m.payload, vec![0xDD]);
+    }
+
+    #[test]
+    fn test_scheduled_inbox_len_tracks_pending() {
+        let mut t = SimulatedTransport::new(500, 0.0, 256);
+        assert_eq!(t.scheduled_inbox_len(), 0);
+        t.inject_message_with_arrival(msg(vec![1]), 1000);
+        t.inject_message_with_arrival(msg(vec![2]), 1100);
+        assert_eq!(t.scheduled_inbox_len(), 2);
+        let _ = t.try_recv_at(1500);
+        assert_eq!(t.scheduled_inbox_len(), 1);
+        let _ = t.try_recv_at(1600);
+        assert_eq!(t.scheduled_inbox_len(), 0);
     }
 }
