@@ -885,6 +885,115 @@ mod tests {
         assert_eq!(level, FinalityLevel::Pending);
     }
 
+    // ============================================================
+    // MED-010 (commit 064) — L0 cap boundary explicit pins.
+    //
+    // The cap is `<=` (line in `assess_finality`):
+    //     if amount_micro_arx <= L0_CAP_MICRO_ARX { ... }
+    // Without explicit boundary tests, a future refactor changing
+    // `<=` to `<` would silently break wallets that send exactly
+    // L0_CAP_MICRO_ARX (the documented "≤ 10 ARX" promise).
+    // The pre-064 suite covered `+1` (rejected) but not `==`,
+    // not `−1`, not `0`. These five tests close the boundary.
+    // ============================================================
+
+    #[test]
+    fn test_assess_l0_at_exact_cap_boundary_accepted() {
+        // PRIMARY MED-010 PIN: amount == L0_CAP_MICRO_ARX (10
+        // ARX) must reach L0 with one valid confirmation. The
+        // documented contract is "≤ 10 ARX" (inclusive).
+        let h = block_hash_a();
+        let (c, pk) = make_confirmation(h);
+        let mut registry = ValidatorRegistry::new();
+        registry.insert(pk, 1);
+        let level = assess_finality(
+            L0_CAP_MICRO_ARX,
+            h,
+            &[c],
+            &SyncResult::Mismatch(0),
+            &[],
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(
+            level,
+            FinalityLevel::L0,
+            "amount == L0_CAP_MICRO_ARX must reach L0 (`<=`)"
+        );
+    }
+
+    #[test]
+    fn test_assess_l0_just_below_cap_accepted() {
+        // amount == L0_CAP_MICRO_ARX − 1 → L0.
+        let h = block_hash_a();
+        let (c, pk) = make_confirmation(h);
+        let mut registry = ValidatorRegistry::new();
+        registry.insert(pk, 1);
+        let level = assess_finality(
+            L0_CAP_MICRO_ARX - 1,
+            h,
+            &[c],
+            &SyncResult::Mismatch(0),
+            &[],
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(level, FinalityLevel::L0);
+    }
+
+    #[test]
+    fn test_assess_l0_zero_amount_accepted() {
+        // Edge: amount == 0 (a zero-value tx, e.g. a no-op
+        // sentinel). With a valid confirmation and the cap
+        // contract `0 <= L0_CAP_MICRO_ARX`, must reach L0. No
+        // panic, no off-by-one.
+        let h = block_hash_a();
+        let (c, pk) = make_confirmation(h);
+        let mut registry = ValidatorRegistry::new();
+        registry.insert(pk, 1);
+        let level = assess_finality(0, h, &[c], &SyncResult::Mismatch(0), &[], &registry).unwrap();
+        assert_eq!(level, FinalityLevel::L0);
+    }
+
+    #[test]
+    fn test_assess_l0_just_above_cap_rejected() {
+        // Symmetric to the existing _above_cap test, but pins
+        // the exact boundary: cap+1 must NOT reach L0. Pinned
+        // alongside _at_exact_cap (==) and _just_below
+        // (cap−1) so the three values around the threshold
+        // are all asserted in one place.
+        let h = block_hash_a();
+        let (c, pk) = make_confirmation(h);
+        let mut registry = ValidatorRegistry::new();
+        registry.insert(pk, 1);
+        let level = assess_finality(
+            L0_CAP_MICRO_ARX + 1,
+            h,
+            &[c],
+            &SyncResult::Mismatch(0),
+            &[],
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(
+            level,
+            FinalityLevel::Pending,
+            "amount > L0_CAP_MICRO_ARX must NOT reach L0"
+        );
+    }
+
+    #[test]
+    fn test_l0_cap_constant_value_pinned() {
+        // The cap value itself is a protocol constant. Pin it
+        // here so changes to `arxia_core::constants` show up
+        // as a finality-test failure, not silently shift the
+        // L0 boundary in the field.
+        assert_eq!(
+            L0_CAP_MICRO_ARX, 10_000_000,
+            "L0 cap is 10 ARX in micro-ARX (10 * 1_000_000)"
+        );
+    }
+
     #[test]
     fn test_assess_dedup_double_voting_validator() {
         // A validator submits the same vote twice. Their stake counts
