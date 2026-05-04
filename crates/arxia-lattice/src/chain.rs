@@ -24,19 +24,36 @@ impl VectorClock {
 
     /// Increment the clock for the given node.
     ///
-    /// MED-018 (commit 060): uses `saturating_add` to defend
-    /// against `u64::MAX` wrap. At wrap, counter sticks at
-    /// `u64::MAX` ; subsequent ticks are no-ops. Practical
-    /// wrap-time is ~292 billion years at 1 tick/ns —
-    /// defense-in-depth only.
+    /// MED-018 (commit 060): uses `saturating_add` against
+    /// u64::MAX wrap.
+    ///
+    /// MED-019 (commit 061): refuses NEW entries beyond
+    /// `arxia_core::MAX_VECTOR_CLOCK_ENTRIES` (256). Existing
+    /// entries continue to tick normally.
     pub fn tick(&mut self, node_id: &str) {
-        let counter = self.clocks.entry(node_id.to_string()).or_insert(0);
+        let key = node_id.to_string();
+        if !self.clocks.contains_key(&key)
+            && self.clocks.len() >= arxia_core::MAX_VECTOR_CLOCK_ENTRIES
+        {
+            return;
+        }
+        let counter = self.clocks.entry(key).or_insert(0);
         *counter = counter.saturating_add(1);
     }
 
     /// Merge with another vector clock (element-wise max).
+    ///
+    /// MED-019 (commit 061): same cap as `tick` — merging in
+    /// a new node ID beyond
+    /// `arxia_core::MAX_VECTOR_CLOCK_ENTRIES` is silently
+    /// dropped. Existing entries always merge.
     pub fn merge(&mut self, other: &VectorClock) {
         for (node_id, &other_val) in &other.clocks {
+            if !self.clocks.contains_key(node_id)
+                && self.clocks.len() >= arxia_core::MAX_VECTOR_CLOCK_ENTRIES
+            {
+                continue;
+            }
             let entry = self.clocks.entry(node_id.clone()).or_insert(0);
             *entry = (*entry).max(other_val);
         }
@@ -990,5 +1007,89 @@ mod tests {
         // Next tick saturates.
         vc.tick("node-edge");
         assert_eq!(vc.clocks["node-edge"], u64::MAX);
+    }
+
+    // ============================================================
+    // MED-019 (commit 061) — VectorClock enforces
+    // MAX_VECTOR_CLOCK_ENTRIES cap on tick + merge.
+    // ============================================================
+
+    #[test]
+    fn test_vc_tick_caps_new_entries_at_max() {
+        // PRIMARY MED-019 PIN: a vector clock at MAX entries
+        // refuses to add a new node-id but still allows
+        // existing entries to tick.
+        let mut vc = VectorClock::new();
+        for i in 0..arxia_core::MAX_VECTOR_CLOCK_ENTRIES {
+            vc.tick(&format!("n-{i:04}"));
+        }
+        assert_eq!(vc.clocks.len(), arxia_core::MAX_VECTOR_CLOCK_ENTRIES);
+        // Try to add an extra new node — should be silently
+        // dropped.
+        vc.tick("n-new-node");
+        assert_eq!(
+            vc.clocks.len(),
+            arxia_core::MAX_VECTOR_CLOCK_ENTRIES,
+            "tick must NOT add a new entry beyond MAX"
+        );
+        assert!(!vc.clocks.contains_key("n-new-node"));
+        // Existing entries can still tick.
+        let val_before = vc.clocks["n-0000"];
+        vc.tick("n-0000");
+        assert_eq!(vc.clocks["n-0000"], val_before + 1);
+    }
+
+    #[test]
+    fn test_vc_merge_caps_new_entries_at_max() {
+        // PRIMARY MED-019 PIN (merge side): merging in a
+        // vector clock with new node IDs while at MAX
+        // silently drops the new ones.
+        let mut a = VectorClock::new();
+        for i in 0..arxia_core::MAX_VECTOR_CLOCK_ENTRIES {
+            a.tick(&format!("a-{i:04}"));
+        }
+        // b has 5 NEW node IDs that aren't in a.
+        let mut b = VectorClock::new();
+        for i in 0..5 {
+            b.tick(&format!("b-{i:04}"));
+        }
+        a.merge(&b);
+        assert_eq!(
+            a.clocks.len(),
+            arxia_core::MAX_VECTOR_CLOCK_ENTRIES,
+            "merge must NOT exceed MAX"
+        );
+        for i in 0..5 {
+            assert!(!a.clocks.contains_key(&format!("b-{i:04}")));
+        }
+    }
+
+    #[test]
+    fn test_vc_merge_overlapping_nodes_always_works() {
+        // Boundary: if `b` only has node IDs already in `a`,
+        // merge succeeds regardless of capacity (no new
+        // entries added).
+        let mut a = VectorClock::new();
+        for i in 0..arxia_core::MAX_VECTOR_CLOCK_ENTRIES {
+            a.tick(&format!("n-{i:04}"));
+        }
+        let mut b = VectorClock::new();
+        b.tick("n-0001");
+        b.tick("n-0001");
+        b.tick("n-0001"); // n-0001 in b is at 3
+        a.merge(&b);
+        assert_eq!(a.clocks.len(), arxia_core::MAX_VECTOR_CLOCK_ENTRIES);
+        // a's n-0001 was 1 ; merge with 3 makes it 3 (max).
+        assert_eq!(a.clocks["n-0001"], 3);
+    }
+
+    #[test]
+    fn test_vc_grows_normally_below_max() {
+        // Regression: standard usage (few nodes) is unaffected.
+        let mut vc = VectorClock::new();
+        vc.tick("alice");
+        vc.tick("bob");
+        vc.tick("carol");
+        assert_eq!(vc.clocks.len(), 3);
     }
 }
