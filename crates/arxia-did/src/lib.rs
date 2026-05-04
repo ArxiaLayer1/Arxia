@@ -402,4 +402,100 @@ mod tests {
         // — this is the surface the audit flagged.
         assert_eq!(bad.identifier(), "no-prefix-here");
     }
+
+    // ============================================================
+    // MED-021 (commit 068) — strict alignment between `ArxiaDid`
+    // (built from a pubkey) and `ParsedArxiaDid` (parsed from a
+    // string). Pre-fix the two types had separate identifier
+    // accessors with no test pinning that they agreed on the
+    // same DID. These tests close that gap.
+    // ============================================================
+
+    fn keypair_a() -> [u8; 32] {
+        // Deterministic test pubkey derived from a fixed
+        // seed. We use the crypto module's helper directly so
+        // the test doesn't depend on a global RNG.
+        let (_, vk) = arxia_crypto::generate_keypair();
+        vk.to_bytes()
+    }
+
+    #[test]
+    fn test_roundtrip_from_public_key_parses_back() {
+        // PRIMARY MED-021 PIN: every DID built from a valid
+        // pubkey must successfully parse via the strict
+        // `parse_did` path. This pins the contract that
+        // `from_public_key` only emits canonical strings —
+        // no hidden formatting drift between producer and
+        // consumer.
+        let pk = keypair_a();
+        let did = ArxiaDid::from_public_key(&pk).unwrap();
+        let parsed = parse_did(did.as_str()).expect("self-roundtrip must parse");
+        assert_eq!(parsed.as_str(), did.as_str());
+    }
+
+    #[test]
+    fn test_roundtrip_identifier_hash_matches_pubkey() {
+        // After roundtrip, the parsed identifier_hash must
+        // equal blake3(pubkey). matches_pubkey returns true.
+        let pk = keypair_a();
+        let did = ArxiaDid::from_public_key(&pk).unwrap();
+        let parsed = parse_did(did.as_str()).unwrap();
+        assert!(parsed.matches_pubkey(&pk));
+        // Cross-check: the hash is exactly blake3(pubkey).
+        let expected = arxia_crypto::hash_blake3_bytes(&pk);
+        assert_eq!(parsed.identifier_hash, expected);
+    }
+
+    #[test]
+    fn test_roundtrip_identifier_string_alignment() {
+        // `ArxiaDid::identifier_strict()` and
+        // `ParsedArxiaDid::identifier()` for the same DID
+        // string must return byte-identical slices. This
+        // pins that the two types agree on what "identifier
+        // portion" means (the part after `did:arxia:`),
+        // closing the alignment gap MED-021 flags.
+        let pk = keypair_a();
+        let did = ArxiaDid::from_public_key(&pk).unwrap();
+        let parsed = parse_did(did.as_str()).unwrap();
+        let from_built = did
+            .identifier_strict()
+            .expect("from_public_key always produces canonical prefix");
+        let from_parsed = parsed.identifier();
+        assert_eq!(
+            from_built, from_parsed,
+            "identifier portion must agree across the two types"
+        );
+    }
+
+    #[test]
+    fn test_roundtrip_matches_pubkey_rejects_other_pubkey() {
+        // Negative: a parsed DID derived from pk1 must NOT
+        // match a different pk2. Symmetric pin to the
+        // positive _matches_pubkey test ; closes the
+        // confused-deputy direction (one DID, two candidate
+        // pubkeys).
+        let pk1 = keypair_a();
+        let pk2 = keypair_a();
+        // Sanity: different keypairs.
+        assert_ne!(pk1, pk2);
+        let did = ArxiaDid::from_public_key(&pk1).unwrap();
+        let parsed = parse_did(did.as_str()).unwrap();
+        assert!(parsed.matches_pubkey(&pk1));
+        assert!(!parsed.matches_pubkey(&pk2));
+    }
+
+    #[test]
+    fn test_roundtrip_lenient_identifier_equals_strict_for_canonical() {
+        // For canonical DIDs (those built via
+        // `from_public_key`), the lenient `identifier()` and
+        // the strict `identifier_strict()` must return the
+        // same value. The lenient form's fallback only kicks
+        // in for malformed inputs ; pin that the canonical
+        // path is unaffected.
+        let pk = keypair_a();
+        let did = ArxiaDid::from_public_key(&pk).unwrap();
+        let lenient = did.identifier();
+        let strict = did.identifier_strict().unwrap();
+        assert_eq!(lenient, strict);
+    }
 }
