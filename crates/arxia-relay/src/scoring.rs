@@ -225,9 +225,43 @@ impl RelayScore {
         Ok(())
     }
 
-    /// Whether this relay is in good standing.
+    /// Minimum cumulative score for a relay to be considered "in
+    /// good standing" by the default [`RelayScore::is_trusted`]
+    /// gate.
+    ///
+    /// MED-011 (commit 065): the threshold value was previously
+    /// implicit in the body of `is_trusted` (`self.score > 0`).
+    /// Lifting it to a named constant lets callers reason about
+    /// the contract symbolically and lets sensitivity-aware
+    /// callers raise the bar via
+    /// [`RelayScore::is_trusted_with_threshold`].
+    ///
+    /// The value `1` corresponds to `score >= 1`, equivalent to
+    /// the original `score > 0`.
+    pub const TRUST_THRESHOLD: i64 = 1;
+
+    /// Whether this relay is in good standing under the default
+    /// [`RelayScore::TRUST_THRESHOLD`].
+    ///
+    /// Equivalent to `self.score >= TRUST_THRESHOLD` ⇔
+    /// `self.score > 0`. Sensitive callers (e.g. high-value
+    /// receipt issuance, escrow-release authorisation) should
+    /// use [`RelayScore::is_trusted_with_threshold`] with a
+    /// stricter bar instead of relying on the default minimum.
     pub fn is_trusted(&self) -> bool {
-        self.score > 0
+        self.is_trusted_with_threshold(Self::TRUST_THRESHOLD)
+    }
+
+    /// Whether this relay's cumulative score is at or above
+    /// `threshold`.
+    ///
+    /// MED-011 (commit 065): explicit-threshold variant. A
+    /// caller can ask "is this relay trusted at score ≥ 50 ?"
+    /// for sensitive operations, while default callers continue
+    /// to use [`RelayScore::is_trusted`] (threshold = 1). No
+    /// behavioural change for existing callers.
+    pub fn is_trusted_with_threshold(&self, threshold: i64) -> bool {
+        self.score >= threshold
     }
 
     /// Record a successful relay AND append a `+SUCCESS_DELTA`
@@ -1284,5 +1318,78 @@ mod tests {
         // Per-target counter still 1, not 2.
         let (s, f, _) = score.per_target_success_rate(&target).unwrap();
         assert_eq!((s, f), (1, 0));
+    }
+
+    // ============================================================
+    // MED-011 (commit 065) — explicit TRUST_THRESHOLD constant +
+    // is_trusted_with_threshold variant. The pre-fix `is_trusted`
+    // used a hard-coded `> 0` ; this commit lifts the threshold
+    // to a named constant and adds a stricter-threshold variant
+    // for sensitive callers, with explicit boundary tests.
+    // ============================================================
+
+    #[test]
+    fn test_trust_threshold_constant_is_one() {
+        // PRIMARY MED-011 PIN: the symbolic constant equals the
+        // numeric threshold the pre-fix used implicitly. Future
+        // refactors changing the bar (e.g. raising to 10) are
+        // visible here as a test failure.
+        assert_eq!(RelayScore::TRUST_THRESHOLD, 1);
+    }
+
+    #[test]
+    fn test_is_trusted_at_default_threshold_score_one() {
+        // Boundary: score == 1 == TRUST_THRESHOLD must be
+        // trusted (>=, not strict >).
+        let mut score = RelayScore::new("r".to_string());
+        score.score = 1;
+        assert!(score.is_trusted());
+    }
+
+    #[test]
+    fn test_is_trusted_at_default_threshold_score_zero() {
+        // Boundary: score == 0 < TRUST_THRESHOLD = 1 → NOT
+        // trusted. Pins the inclusive-lower-bound contract.
+        let mut score = RelayScore::new("r".to_string());
+        score.score = 0;
+        assert!(!score.is_trusted());
+    }
+
+    #[test]
+    fn test_is_trusted_at_default_threshold_score_negative() {
+        // After many failures the score goes negative ; must
+        // be rejected.
+        let mut score = RelayScore::new("r".to_string());
+        score.score = -1;
+        assert!(!score.is_trusted());
+    }
+
+    #[test]
+    fn test_is_trusted_with_stricter_threshold_rejects_low_scores() {
+        // A sensitive caller raises the bar to 50. A relay with
+        // score == 49 is rejected, score == 50 is accepted.
+        let mut score = RelayScore::new("r".to_string());
+        score.score = 49;
+        assert!(!score.is_trusted_with_threshold(50));
+        score.score = 50;
+        assert!(score.is_trusted_with_threshold(50));
+    }
+
+    #[test]
+    fn test_is_trusted_with_threshold_consistent_with_default_at_one() {
+        // The default `is_trusted` and
+        // `is_trusted_with_threshold(TRUST_THRESHOLD)` must
+        // return the same value for any score. Pins that the
+        // default form is exactly the threshold form at the
+        // default threshold.
+        for s in [-100i64, -1, 0, 1, 2, 100, i64::MAX] {
+            let mut score = RelayScore::new("r".to_string());
+            score.score = s;
+            assert_eq!(
+                score.is_trusted(),
+                score.is_trusted_with_threshold(RelayScore::TRUST_THRESHOLD),
+                "default and explicit-threshold must agree at TRUST_THRESHOLD for score={s}"
+            );
+        }
     }
 }
