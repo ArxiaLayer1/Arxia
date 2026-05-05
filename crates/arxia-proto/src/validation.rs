@@ -10,6 +10,30 @@
 //! See the crate-level docstring for the protocol-level
 //! rationale.
 
+/// Maximum nesting depth a protobuf-encoded message is allowed to
+/// reach when decoded via a depth-aware consumer.
+///
+/// MED-012 (commit 070): pre-emptive guard. The current `.proto`
+/// files do not contain recursive message structures, but the
+/// wire protocol permits them via `Any`-style extensibility ; a
+/// future definition that introduces recursion (deliberately or
+/// accidentally) would expose a stack-overflow attack surface
+/// where an attacker crafts a message with thousands of levels
+/// of nesting.
+///
+/// Consumers that decode such message types MUST track decode
+/// recursion depth (typically via a counter incremented on each
+/// nested call) and abort decode when the counter exceeds this
+/// constant. See [`validate_proto_decode_depth`] for the helper.
+///
+/// The value `64` is deliberately conservative: realistic Arxia
+/// protocol messages never exceed ~6 levels (envelope → payload
+/// → field → primitive), so 64 leaves room for an order-of-
+/// magnitude growth in protocol expressiveness while still
+/// catching adversarial blow-ups long before any host's default
+/// stack runs out.
+pub const MAX_PROTO_DECODE_DEPTH: usize = 64;
+
 /// Maximum acceptable size in bytes of a single TransportFrame on
 /// the wire, measured BEFORE prost decode.
 ///
@@ -47,6 +71,16 @@ pub enum ProtoError {
         /// missing its `oneof` variant (e.g. `"GossipEnvelope"`).
         envelope_kind: &'static str,
     },
+    /// MED-012 (commit 070): the depth-aware consumer detected
+    /// a nested message structure exceeding
+    /// [`MAX_PROTO_DECODE_DEPTH`]. Pre-emptive guard against
+    /// stack-overflow attacks via deeply-nested messages.
+    DecodeDepthExceeded {
+        /// Depth the consumer reached before aborting.
+        depth: usize,
+        /// The cap, [`MAX_PROTO_DECODE_DEPTH`].
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for ProtoError {
@@ -62,6 +96,12 @@ impl std::fmt::Display for ProtoError {
                 write!(
                     f,
                     "{envelope_kind} decoded with empty oneof payload (unknown or missing variant)"
+                )
+            }
+            Self::DecodeDepthExceeded { depth, max } => {
+                write!(
+                    f,
+                    "proto decode depth {depth} exceeds cap {max} (MED-012 stack-overflow guard)"
                 )
             }
         }
@@ -128,6 +168,36 @@ pub fn require_envelope_payload<'a, T>(
     envelope_kind: &'static str,
 ) -> Result<&'a T, ProtoError> {
     payload.ok_or(ProtoError::EnvelopePayloadEmpty { envelope_kind })
+}
+
+/// MED-012 (commit 070): assert that a depth-aware consumer's
+/// decode-depth counter has not exceeded [`MAX_PROTO_DECODE_DEPTH`].
+///
+/// Returns `Ok(())` if `depth <= MAX_PROTO_DECODE_DEPTH`, else
+/// `Err(ProtoError::DecodeDepthExceeded { depth, max })`. Designed
+/// to be called at the top of any recursive decode helper:
+///
+/// ```ignore
+/// fn decode_recursive(bytes: &[u8], depth: usize) -> Result<T, ProtoError> {
+///     validate_proto_decode_depth(depth)?;
+///     // ... decode children with `decode_recursive(.., depth + 1)?` ...
+/// }
+/// ```
+///
+/// This is a **pre-emptive** guard: the current Arxia `.proto`
+/// definitions do not contain recursive structures, so the helper
+/// has no in-tree caller yet. It is exposed now so that any future
+/// recursion-introducing schema change can opt into the cap with a
+/// single function call instead of re-deriving the constant or
+/// re-implementing the comparison.
+pub fn validate_proto_decode_depth(depth: usize) -> Result<(), ProtoError> {
+    if depth > MAX_PROTO_DECODE_DEPTH {
+        return Err(ProtoError::DecodeDepthExceeded {
+            depth,
+            max: MAX_PROTO_DECODE_DEPTH,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -291,5 +361,95 @@ mod tests {
         let empty = ProtoError::EnvelopePayloadEmpty { envelope_kind: "X" };
         assert_ne!(format!("{too_large}"), format!("{empty}"));
         assert_ne!(too_large, empty);
+    }
+
+    // ============================================================
+    // MED-012 (commit 070) — proto decode-depth cap.
+    //
+    // Pre-emptive guard. Current `.proto` files don't have
+    // recursion, so there is no in-tree caller yet ; these
+    // tests pin the helper's contract so any future recursion-
+    // introducing schema change can opt in with one call.
+    // ============================================================
+
+    #[test]
+    fn test_max_proto_decode_depth_constant() {
+        // PRIMARY MED-012 PIN: the symbolic depth cap. Future
+        // refactors changing it (e.g. raising to 256, which
+        // could be unsafe for some host stack sizes) fail this
+        // test.
+        assert_eq!(MAX_PROTO_DECODE_DEPTH, 64);
+    }
+
+    #[test]
+    fn test_validate_proto_decode_depth_accepts_zero() {
+        // Edge: depth 0 (top-level decode, no nesting yet) is
+        // always within the cap. No off-by-one.
+        assert!(validate_proto_decode_depth(0).is_ok());
+    }
+
+    #[test]
+    fn test_validate_proto_decode_depth_accepts_at_cap() {
+        // Boundary: depth == cap is accepted (`<=`, inclusive).
+        assert!(validate_proto_decode_depth(MAX_PROTO_DECODE_DEPTH).is_ok());
+    }
+
+    #[test]
+    fn test_validate_proto_decode_depth_rejects_just_above_cap() {
+        // Boundary: depth == cap + 1 is rejected.
+        let err = validate_proto_decode_depth(MAX_PROTO_DECODE_DEPTH + 1)
+            .expect_err("cap+1 must be rejected");
+        match err {
+            ProtoError::DecodeDepthExceeded { depth, max } => {
+                assert_eq!(depth, MAX_PROTO_DECODE_DEPTH + 1);
+                assert_eq!(max, MAX_PROTO_DECODE_DEPTH);
+            }
+            other => panic!("expected DecodeDepthExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_proto_decode_depth_rejects_attacker_scale() {
+        // Attacker submits a deliberately huge depth.
+        let err = validate_proto_decode_depth(10_000).expect_err("10_000 levels must be rejected");
+        assert!(matches!(
+            err,
+            ProtoError::DecodeDepthExceeded { depth, max }
+                if depth == 10_000 && max == MAX_PROTO_DECODE_DEPTH
+        ));
+    }
+
+    #[test]
+    fn test_proto_error_decode_depth_exceeded_display_format() {
+        let err = ProtoError::DecodeDepthExceeded {
+            depth: 200,
+            max: MAX_PROTO_DECODE_DEPTH,
+        };
+        let s = format!("{err}");
+        assert!(s.contains("200"));
+        assert!(s.contains(&MAX_PROTO_DECODE_DEPTH.to_string()));
+        assert!(s.contains("depth") || s.contains("nest"));
+    }
+
+    #[test]
+    fn test_three_failure_modes_are_all_distinguishable() {
+        // Strengthen the prior 2-mode pin to 3 modes now that
+        // MED-012 adds a third variant. Each must be distinct
+        // in PartialEq and in Display.
+        let too_large = ProtoError::TransportFrameTooLarge {
+            size: 1,
+            max: MAX_TRANSPORT_FRAME_BYTES,
+        };
+        let empty = ProtoError::EnvelopePayloadEmpty { envelope_kind: "X" };
+        let too_deep = ProtoError::DecodeDepthExceeded {
+            depth: 200,
+            max: MAX_PROTO_DECODE_DEPTH,
+        };
+        assert_ne!(too_large, empty);
+        assert_ne!(empty, too_deep);
+        assert_ne!(too_large, too_deep);
+        assert_ne!(format!("{too_large}"), format!("{empty}"));
+        assert_ne!(format!("{empty}"), format!("{too_deep}"));
+        assert_ne!(format!("{too_large}"), format!("{too_deep}"));
     }
 }
