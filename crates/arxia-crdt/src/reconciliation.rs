@@ -877,4 +877,149 @@ mod tests {
         // bob: 100 (open) + 5_000_000 (receive) = 5_000_100
         assert_eq!(report.balances[bob.id()], 5_000_100);
     }
+
+    // ============================================================
+    // MED-022 (commit 069) — post-007 reconciliation walk-through.
+    //
+    // HIGH-007 (commit 007) introduced the conflict-resolution
+    // path that picks a single winner per (account, nonce)
+    // group via deterministic hash-tiebreak, and then rejects
+    // RECEIVEs that referenced the losing SEND. The pre-fix
+    // suite covered each piece individually ; this test serves
+    // as a single self-contained example demonstrating the
+    // full lifecycle, suitable for documentation and
+    // regression-guard purposes.
+    // ============================================================
+
+    #[test]
+    fn test_post007_walkthrough_double_spend_with_recipient_chains() {
+        // PRIMARY MED-022 PIN: end-to-end documented example.
+        //
+        // Setup: alice has 1_000_000 micro-ARX after Open at
+        // nonce=1.
+        //
+        // Partition A: alice sends 600_000 to bob (alice nonce=2),
+        // then bob receives. Bob's chain: [Open, Receive].
+        //
+        // Partition B: alice (rolled back to post-Open state) sends
+        // 600_000 to carol (alice nonce=2), then carol receives.
+        // Carol's chain: [Open, Receive].
+        //
+        // Both alice-sends share (account=alice, nonce=2) — exactly
+        // the conflict shape HIGH-007 resolves. Hash-tiebreak picks
+        // a deterministic winner ; the loser's RECEIVE on the other
+        // side ends up in `rejected_receives` (commit 007 +
+        // commit 011 inheritance).
+        //
+        // Expected end state:
+        // - alice.balance = 1_000_000 − 600_000 = 400_000
+        //   (the surviving SEND is honoured exactly once).
+        // - The winner-recipient sees +600_000.
+        // - The loser-recipient sees only their Open value
+        //   (the RECEIVE referencing the losing SEND is rejected).
+        // - report.conflicts.len() == 1.
+        // - report.rejected_receives.len() == 1.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        let mut carol = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        carol.open(0, &mut vc).unwrap();
+
+        // Snapshot alice's open block — needed in both partitions.
+        let alice_open = alice.chain[0].clone();
+
+        // ---- Partition A path ----
+        let send_bob = alice.send(bob.id(), 600_000, &mut vc).unwrap();
+        bob.receive(&send_bob, &mut vc).unwrap();
+        let partition_a = vec![
+            alice_open.clone(),
+            send_bob.clone(),
+            bob.chain[0].clone(),
+            bob.chain[1].clone(),
+        ];
+
+        // Roll alice back to post-Open state to simulate the
+        // pre-merge isolation of partition B (they don't see
+        // partition A's SEND yet).
+        alice.chain.pop();
+        alice.balance += 600_000;
+        alice.nonce -= 1;
+        alice.consumed_sources.clear();
+
+        // ---- Partition B path ----
+        let send_carol = alice.send(carol.id(), 600_000, &mut vc).unwrap();
+        carol.receive(&send_carol, &mut vc).unwrap();
+        let partition_b = vec![
+            alice_open,
+            send_carol.clone(),
+            carol.chain[0].clone(),
+            carol.chain[1].clone(),
+        ];
+
+        // ---- Reconcile ----
+        let report = reconcile_partitions(&partition_a, &partition_b).unwrap();
+
+        // 1. Exactly one conflict resolved.
+        assert_eq!(
+            report.conflicts.len(),
+            1,
+            "exactly one (account=alice, nonce=2) conflict"
+        );
+        let conflict = &report.conflicts[0];
+        assert_eq!(conflict.account, alice.id());
+        assert_eq!(conflict.nonce, 2);
+        assert_eq!(conflict.method, "hash_tiebreaker");
+        // Winner is the lexicographically smallest hash.
+        let mut hashes = [send_bob.hash.clone(), send_carol.hash.clone()];
+        hashes.sort();
+        assert_eq!(conflict.winner_hash, hashes[0]);
+
+        // 2. Alice keeps exactly 400_000 — the winning SEND
+        //    debited her once.
+        assert_eq!(report.balances[alice.id()], 400_000);
+
+        // 3. The recipient of the winning SEND has +600_000.
+        let winner_recipient = if conflict.winner_hash == send_bob.hash {
+            bob.id()
+        } else {
+            carol.id()
+        };
+        let loser_recipient = if conflict.winner_hash == send_bob.hash {
+            carol.id()
+        } else {
+            bob.id()
+        };
+        assert_eq!(
+            report.balances[winner_recipient], 600_000,
+            "winning recipient credited"
+        );
+        assert_eq!(
+            report.balances[loser_recipient], 0,
+            "losing recipient sees only their Open (no credit from rejected RECEIVE)"
+        );
+
+        // 4. Exactly one RECEIVE rejected (the one that
+        //    referenced the losing SEND).
+        assert_eq!(
+            report.rejected_receives.len(),
+            1,
+            "the RECEIVE referencing the losing SEND is rejected"
+        );
+
+        // 5. Conservation: alice's debit (600_000) equals the
+        //    winning recipient's credit. No phantom value
+        //    materialised.
+        let alice_debit = 1_000_000 - report.balances[alice.id()];
+        let total_recipient_credit = report.balances[winner_recipient];
+        assert_eq!(
+            alice_debit, total_recipient_credit,
+            "value conservation across the partition merge"
+        );
+
+        // 6. No genesis rejections (this scenario doesn't
+        //    forge non-genesis Opens).
+        assert!(report.rejected_genesis.is_empty());
+    }
 }
