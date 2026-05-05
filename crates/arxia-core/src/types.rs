@@ -177,4 +177,82 @@ mod tests {
             "100 years should be > 3e12 ms, got {ms}"
         );
     }
+
+    // ============================================================
+    // LOW-001 (commit 072) — BlockTypeTag::from_byte exhaustive
+    // intermediate-byte rejection. The pre-fix suite covered
+    // 0x00–0x03 (positive) and 0xFF (single negative). Bytes
+    // 0x04–0xFE — 251 distinct invalid values — were not
+    // exercised. A regression that accidentally accepted, say,
+    // 0x42 as a new variant would slip through. Sweep them all.
+    // ============================================================
+
+    #[test]
+    fn test_from_byte_rejects_all_intermediate_invalid_bytes() {
+        // PRIMARY LOW-001 PIN: every byte in 0x04..=0xFE must
+        // be rejected with `InvalidBlockType(b)`. Sweep the
+        // full range so a future variant addition that
+        // forgets to update this test fails immediately.
+        for b in 0x04u8..=0xFEu8 {
+            let err =
+                BlockTypeTag::from_byte(b).expect_err(&format!("byte 0x{b:02X} must be rejected"));
+            match err {
+                crate::ArxiaError::InvalidBlockType(got) => {
+                    assert_eq!(got, b, "error must carry the offending byte unchanged");
+                }
+                other => panic!("byte 0x{b:02X} produced unexpected variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_from_byte_round_trip_all_valid_variants_via_repr() {
+        // Symmetric pin: every valid variant's discriminant
+        // round-trips through from_byte. Pre-072 the test
+        // suite covered each variant individually ; pin them
+        // as a vector so adding a new variant requires this
+        // single point to be updated.
+        let valid: &[(u8, BlockTypeTag)] = &[
+            (0x00, BlockTypeTag::Open),
+            (0x01, BlockTypeTag::Send),
+            (0x02, BlockTypeTag::Receive),
+            (0x03, BlockTypeTag::Revoke),
+        ];
+        for &(b, expected) in valid {
+            assert_eq!(
+                BlockTypeTag::from_byte(b).unwrap(),
+                expected,
+                "byte 0x{b:02X} must round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_byte_rejects_0xff_unchanged() {
+        // The pre-072 single negative was 0xFF ; the LOW-001
+        // sweep above stops at 0xFE. Pin 0xFF here as the
+        // top boundary so the full 0x04..=0xFF rejection set
+        // is covered in two tests.
+        let err = BlockTypeTag::from_byte(0xFF).expect_err("0xFF must be rejected");
+        assert!(matches!(err, crate::ArxiaError::InvalidBlockType(0xFF)));
+    }
+
+    #[test]
+    fn test_from_byte_total_partition_of_u8_space() {
+        // Sanity: the 256-byte u8 space partitions cleanly
+        // into "valid" (4 bytes: 0x00, 0x01, 0x02, 0x03) and
+        // "invalid" (252 bytes: 0x04..=0xFF). No byte is
+        // both valid and invalid ; no byte is unhandled.
+        let mut valid_count = 0u32;
+        let mut invalid_count = 0u32;
+        for b in 0u8..=255u8 {
+            match BlockTypeTag::from_byte(b) {
+                Ok(_) => valid_count += 1,
+                Err(_) => invalid_count += 1,
+            }
+        }
+        assert_eq!(valid_count, 4);
+        assert_eq!(invalid_count, 252);
+        assert_eq!(valid_count + invalid_count, 256);
+    }
 }
