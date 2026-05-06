@@ -131,9 +131,18 @@ impl AccountChain {
         &self.public_key_hex
     }
 
-    /// Short identifier (first 8 hex chars).
+    /// Short identifier (first 8 hex chars of the public-key hex
+    /// encoding).
+    ///
+    /// LOW-004 (commit 075): defensive slice. The invariant is
+    /// that `public_key_hex` is always 64 chars (`hex::encode` of
+    /// a 32-byte Ed25519 pubkey) so the unchecked `[..8]` never
+    /// panics in production. We still use `get(..8)` and fall back
+    /// to the full string so a future refactor that loosens the
+    /// invariant (e.g. lazy-init or partial-fill) cannot trigger
+    /// a panic at this site.
     pub fn short_id(&self) -> &str {
-        &self.public_key_hex[..8]
+        self.public_key_hex.get(..8).unwrap_or(&self.public_key_hex)
     }
 
     /// Reference to the signing key (for consensus voting).
@@ -1091,5 +1100,54 @@ mod tests {
         vc.tick("bob");
         vc.tick("carol");
         assert_eq!(vc.clocks.len(), 3);
+    }
+
+    // ============================================================
+    // LOW-004 (commit 075) — short_id defensive slice. The
+    // invariant is that public_key_hex is always 64 chars
+    // (hex::encode of 32 bytes), so the original [..8] never
+    // panicked in production. The post-fix `get(..8)` keeps
+    // that behaviour for the canonical case and falls back to
+    // the full string if the invariant is ever loosened.
+    // ============================================================
+
+    #[test]
+    fn test_short_id_returns_first_8_chars_of_full_id() {
+        // PRIMARY LOW-004 PIN: for a fresh AccountChain (canonical
+        // 64-char hex pubkey), short_id() returns exactly the
+        // first 8 characters of id().
+        let alice = AccountChain::new();
+        let full = alice.id();
+        assert_eq!(full.len(), 64, "id is 64 hex chars");
+        let short = alice.short_id();
+        assert_eq!(short.len(), 8);
+        assert_eq!(short, &full[..8]);
+    }
+
+    #[test]
+    fn test_short_id_stable_across_calls() {
+        // Sanity: short_id is a pure projection of public_key_hex
+        // and must return the same slice across calls. Pin
+        // against a future refactor that introduces caching
+        // with a stale-read bug.
+        let alice = AccountChain::new();
+        let s1 = alice.short_id().to_string();
+        let s2 = alice.short_id().to_string();
+        let s3 = alice.short_id().to_string();
+        assert_eq!(s1, s2);
+        assert_eq!(s2, s3);
+    }
+
+    #[test]
+    fn test_short_id_different_accounts_differ_with_high_probability() {
+        // Two fresh accounts have different pubkeys → different
+        // short_ids (with 1 - 1/2^32 ≈ 1.0 probability).
+        let alice = AccountChain::new();
+        let bob = AccountChain::new();
+        assert_ne!(
+            alice.short_id(),
+            bob.short_id(),
+            "two random pubkeys collide on first 8 hex chars (≈ 1 in 4 billion)"
+        );
     }
 }
