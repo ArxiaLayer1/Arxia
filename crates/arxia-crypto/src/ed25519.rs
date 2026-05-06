@@ -383,4 +383,70 @@ mod tests {
         // probe — if `validate_pubkey_strict` ever PANICS on this
         // input, that's the regression.
     }
+
+    // ============================================================
+    // LOW-002 (commit 073) — keypair uniqueness over a larger
+    // sample. The pre-fix `test_generate_keypair_unique` runs
+    // only twice (vk1 != vk2). A broken RNG that produces
+    // distinct outputs the first two calls and identical
+    // outputs on the third would slip through. Sweep N=64
+    // generations and pin pairwise distinctness. The 64-sample
+    // collision probability for a sound RNG is ≈ 64*63/2 / 2^256
+    // ≈ 1e-74, well below any meaningful flake threshold.
+    // ============================================================
+
+    #[test]
+    fn test_generate_keypair_uniqueness_over_64_samples() {
+        // PRIMARY LOW-002 PIN: 64 generations, pairwise
+        // distinct via HashSet insertion.
+        const N: usize = 64;
+        let mut seen: std::collections::HashSet<[u8; 32]> =
+            std::collections::HashSet::with_capacity(N);
+        for i in 0..N {
+            let (_, vk) = generate_keypair();
+            let inserted = seen.insert(vk.to_bytes());
+            assert!(
+                inserted,
+                "iteration {i}: generate_keypair returned a duplicate pubkey {:?}",
+                vk.to_bytes()
+            );
+        }
+        assert_eq!(seen.len(), N);
+    }
+
+    #[test]
+    fn test_generate_keypair_uniqueness_signing_keys_too() {
+        // The verifying key is derived from the signing key ;
+        // pin both. A broken RNG that somehow produced a
+        // distinct vk for the same sk would still be caught
+        // upstream by validate_pubkey_strict, but the signing
+        // key is the source of authority and must be unique.
+        const N: usize = 32;
+        let mut seen_sk: std::collections::HashSet<[u8; 32]> =
+            std::collections::HashSet::with_capacity(N);
+        let mut seen_vk: std::collections::HashSet<[u8; 32]> =
+            std::collections::HashSet::with_capacity(N);
+        for _ in 0..N {
+            let (sk, vk) = generate_keypair();
+            assert!(seen_sk.insert(sk.to_bytes()), "sk duplicate");
+            assert!(seen_vk.insert(vk.to_bytes()), "vk duplicate");
+        }
+        assert_eq!(seen_sk.len(), N);
+        assert_eq!(seen_vk.len(), N);
+    }
+
+    #[test]
+    fn test_generate_keypair_distinct_from_zero() {
+        // A broken RNG returning all zeros would produce a
+        // signing key of zeros (which Ed25519 treats as
+        // valid input but corresponds to a degenerate
+        // identity). Pin that fresh keypairs are never
+        // all-zero.
+        let zero = [0u8; 32];
+        for _ in 0..16 {
+            let (sk, vk) = generate_keypair();
+            assert_ne!(sk.to_bytes(), zero, "sk is all-zero (broken RNG?)");
+            assert_ne!(vk.to_bytes(), zero, "vk is all-zero (broken RNG?)");
+        }
+    }
 }
