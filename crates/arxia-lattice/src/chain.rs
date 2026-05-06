@@ -8,6 +8,14 @@ use crate::block::{Block, BlockType};
 use arxia_core::ArxiaError;
 
 /// Vector clock for causal ordering. Uses BTreeMap for deterministic iteration.
+///
+/// **NOT the same as `arxia_crdt::CrdtVectorClock`** (LOW-006,
+/// commit 077). This lattice form is used at block-creation time
+/// and is capped at [`arxia_core::MAX_VECTOR_CLOCK_ENTRIES`]
+/// (commit 061) to bound adversarial peers' memory impact at the
+/// hot path. The CRDT form has no cap (CRDTs absorb arbitrary
+/// participation). Pick by use case ; the names are deliberately
+/// similar but the semantics differ.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct VectorClock {
     /// Map from node ID to logical clock value.
