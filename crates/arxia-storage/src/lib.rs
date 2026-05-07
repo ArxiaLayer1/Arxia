@@ -208,6 +208,53 @@ impl Default for ConcurrentMemoryStorage {
     }
 }
 
+/// LOW-011 (commit 082): Blake3-checksummed value envelope.
+///
+/// `wrap_with_checksum(value)` prepends a 32-byte Blake3 hash to
+/// the value bytes so a later `unwrap_with_checksum` can detect
+/// any tampering or storage corruption. The wire format is
+/// `[32-byte blake3(value)][value_bytes]`.
+///
+/// This is opt-in: callers pass the wrapped bytes to
+/// `MemoryStorage::put` and the wrapped bytes back through
+/// `unwrap_with_checksum` after `get`. The default
+/// `put`/`get` path remains zero-overhead for callers that
+/// don't need integrity checking.
+pub fn wrap_with_checksum(value: &[u8]) -> Vec<u8> {
+    let checksum = arxia_crypto::hash_blake3_bytes(value);
+    let mut out = Vec::with_capacity(32 + value.len());
+    out.extend_from_slice(&checksum);
+    out.extend_from_slice(value);
+    out
+}
+
+/// LOW-011 (commit 082): unwrap and verify a checksummed value
+/// envelope produced by [`wrap_with_checksum`].
+///
+/// On success returns the inner value bytes (not the checksum).
+/// Returns `Err(ArxiaError::InvalidKey)` (reused as a typed
+/// "integrity violation" surface) if:
+/// - The combined bytes are shorter than 32 (no room for the
+///   checksum prefix).
+/// - The recomputed Blake3 hash of the value bytes does not
+///   match the stored prefix (corruption or tampering).
+pub fn unwrap_with_checksum(combined: &[u8]) -> Result<Vec<u8>, ArxiaError> {
+    if combined.len() < 32 {
+        return Err(ArxiaError::InvalidKey(format!(
+            "checksumed value too short: got {} bytes, need >= 32 for prefix",
+            combined.len()
+        )));
+    }
+    let (prefix, value) = combined.split_at(32);
+    let recomputed = arxia_crypto::hash_blake3_bytes(value);
+    if prefix != recomputed {
+        return Err(ArxiaError::InvalidKey(
+            "checksumed value: Blake3 prefix does not match recomputed hash (corruption or tampering)".to_string(),
+        ));
+    }
+    Ok(value.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,5 +485,79 @@ mod tests {
         let b = ConcurrentMemoryStorage::new();
         assert!(a.is_empty().unwrap());
         assert!(b.is_empty().unwrap());
+    }
+
+    // ============================================================
+    // LOW-011 (commit 082) — Blake3 round-trip checksum.
+    //
+    // Opt-in `wrap_with_checksum` / `unwrap_with_checksum`
+    // helpers. Wire format: `[32-byte blake3(value)][value_bytes]`.
+    // Default put/get unchanged ; checksumed callers use the
+    // helpers around the existing API.
+    // ============================================================
+
+    #[test]
+    fn test_wrap_unwrap_round_trip() {
+        // PRIMARY LOW-011 PIN: any value round-trips via
+        // wrap → store → load → unwrap.
+        let mut store = MemoryStorage::new();
+        let value = b"hello world".to_vec();
+        let wrapped = wrap_with_checksum(&value);
+        assert_eq!(wrapped.len(), 32 + value.len());
+        store.put(b"k", &wrapped).unwrap();
+        let loaded = store.get(b"k").unwrap().unwrap();
+        let unwrapped = unwrap_with_checksum(&loaded).unwrap();
+        assert_eq!(unwrapped, value);
+    }
+
+    #[test]
+    fn test_unwrap_rejects_corrupted_value() {
+        // Tamper with the value bytes (after the prefix). The
+        // Blake3 recompute must mismatch, raising InvalidKey.
+        let value = b"original".to_vec();
+        let mut wrapped = wrap_with_checksum(&value);
+        wrapped[32] ^= 0xFF; // flip a bit in the value, not the prefix
+        let err = unwrap_with_checksum(&wrapped).expect_err("value tampering must be detected");
+        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+    }
+
+    #[test]
+    fn test_unwrap_rejects_corrupted_checksum() {
+        // Tamper with the checksum prefix. Same detection.
+        let value = b"original".to_vec();
+        let mut wrapped = wrap_with_checksum(&value);
+        wrapped[0] ^= 0xFF; // flip a bit in the prefix
+        let err = unwrap_with_checksum(&wrapped).expect_err("checksum tampering must be detected");
+        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+    }
+
+    #[test]
+    fn test_unwrap_rejects_too_short_envelope() {
+        // <32 bytes can't even contain the prefix.
+        let too_short = vec![0u8; 16];
+        let err = unwrap_with_checksum(&too_short).expect_err("short envelope must be rejected");
+        assert!(matches!(err, ArxiaError::InvalidKey(msg) if msg.contains("32")));
+    }
+
+    #[test]
+    fn test_wrap_unwrap_empty_value() {
+        // Edge: empty value. Wrapped envelope is exactly 32
+        // bytes (just the checksum). Round-trip succeeds.
+        let value = Vec::new();
+        let wrapped = wrap_with_checksum(&value);
+        assert_eq!(wrapped.len(), 32);
+        let unwrapped = unwrap_with_checksum(&wrapped).unwrap();
+        assert!(unwrapped.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_unwrap_long_value() {
+        // 1 MiB value. Round-trip succeeds without panic or
+        // truncation.
+        let value = vec![0xAAu8; 1024 * 1024];
+        let wrapped = wrap_with_checksum(&value);
+        let unwrapped = unwrap_with_checksum(&wrapped).unwrap();
+        assert_eq!(unwrapped.len(), value.len());
+        assert_eq!(unwrapped, value);
     }
 }
