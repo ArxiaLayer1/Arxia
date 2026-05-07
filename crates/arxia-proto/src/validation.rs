@@ -452,4 +452,39 @@ mod tests {
         assert_ne!(format!("{empty}"), format!("{too_deep}"));
         assert_ne!(format!("{too_large}"), format!("{too_deep}"));
     }
+
+    // ============================================================
+    // LOW-008 (commit 080) — proto stub gating.
+    //
+    // build.rs sets one of `arxia_proto_real` (protoc found) or
+    // `arxia_proto_stub` (protoc missing, stub used). The
+    // PROTO_STUB_ACTIVE const reflects which one is set so
+    // callers can introspect at runtime / in tests without
+    // using cfg!() macros.
+    // ============================================================
+
+    #[test]
+    fn test_proto_stub_active_is_consistent_with_cfg() {
+        // PRIMARY LOW-008 PIN: PROTO_STUB_ACTIVE matches the
+        // cfg flag set by build.rs.
+        let stub_active = crate::PROTO_STUB_ACTIVE;
+        let cfg_stub = cfg!(arxia_proto_stub);
+        let cfg_real = cfg!(arxia_proto_real);
+        assert_eq!(
+            stub_active, cfg_stub,
+            "PROTO_STUB_ACTIVE must match cfg(arxia_proto_stub)"
+        );
+        assert_ne!(
+            cfg_real, cfg_stub,
+            "exactly one of (arxia_proto_real, arxia_proto_stub) must be set"
+        );
+    }
+
+    #[test]
+    fn test_proto_stub_active_is_const_bool() {
+        // Compile-time pin: PROTO_STUB_ACTIVE is a `bool` const
+        // (not a function or a runtime-evaluated expression).
+        // Pin the type via a const context.
+        const _: bool = crate::PROTO_STUB_ACTIVE;
+    }
 }
