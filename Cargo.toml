@@ -37,22 +37,29 @@ repository = "https://github.com/arxialayer1/arxia"
 homepage = "https://arxia.one"
 description = "Layer 1 blockchain for offline-first mesh consensus"
 
+# LOW-015 (commit 086): every dependency is `major.minor` pinned.
+# Rationale: a bare `"1"` allows cargo to pick any 1.x.y, which
+# can drift through unannounced API additions. `"1.0"` still
+# allows compatible upgrades within 1.x but documents the
+# minimum minor we depend on, so a future audit can spot a
+# silent bump. Path-only crates (the workspace members below)
+# don't need version pins.
 [workspace.dependencies]
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-blake3 = "1"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+blake3 = "1.8"
 chacha20poly1305 = "0.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-bincode = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
 prost = "0.14"
 hex = "0.4"
 lz4_flex = "0.11"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.44", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 criterion = { version = "0.7", features = ["html_reports"] }
 rand = "0.8.6"
-thiserror = "2"
+thiserror = "2.0"
 bs58 = "0.5"
 
 arxia-core = { path = "crates/arxia-core" }
