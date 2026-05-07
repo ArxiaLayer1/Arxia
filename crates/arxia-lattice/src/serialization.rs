@@ -111,9 +111,37 @@ pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
         // zeros so the wire format is still 193 bytes. A
         // missing/wrong-length signature is caught by `verify_block`
         // downstream.
+        //
+        // LOW-005 (commit 076): callers that want to fail loudly
+        // on a wrong-length signature instead of silently padding
+        // can use [`to_compact_bytes_strict`]. Both forms produce
+        // identical 193-byte output for canonical inputs.
         buf.extend_from_slice(&[0u8; 64]);
     }
     Ok(buf)
+}
+
+/// Strict variant of [`to_compact_bytes`] that returns an error
+/// instead of silently zero-padding a wrong-length signature.
+///
+/// LOW-005 (commit 076): the lenient form pads with `[0u8; 64]`
+/// so the wire format is always 193 bytes ; downstream
+/// `verify_block` catches the all-zero signature. Sensitive
+/// callers (e.g. those serialising blocks for long-term archival
+/// where downstream verify isn't run on every read) can use this
+/// strict form to fail at serialisation time instead.
+///
+/// Returns `Err(ArxiaError::SignatureInvalid)` if
+/// `block.signature.len() != 64`. On success, the bytes are
+/// byte-identical to [`to_compact_bytes`].
+pub fn to_compact_bytes_strict(block: &Block) -> Result<Vec<u8>, ArxiaError> {
+    if block.signature.len() != 64 {
+        return Err(ArxiaError::SignatureInvalid(format!(
+            "compact-bytes serialization requires 64-byte signature, got {}",
+            block.signature.len()
+        )));
+    }
+    to_compact_bytes(block)
 }
 
 /// Deserialize a block from compact binary format (193 bytes).
@@ -514,5 +542,89 @@ mod tests {
             "MED-003: production code must use typed `?` propagation \
              instead of .expect(\"8 bytes\") on slice-to-array conversions"
         );
+    }
+
+    // ============================================================
+    // LOW-005 (commit 076) — to_compact_bytes_strict.
+    //
+    // The lenient `to_compact_bytes` zero-pads a wrong-length
+    // signature so the wire format is always 193 bytes. Strict
+    // callers (long-term archival, where downstream verify is
+    // not run on every read) can use `to_compact_bytes_strict`
+    // to fail at serialisation time instead.
+    // ============================================================
+
+    #[test]
+    fn test_to_compact_bytes_lenient_zero_pads_short_signature() {
+        // Pin the existing lenient behaviour (regression guard).
+        // A block with a 0-byte signature serialises to 193
+        // bytes ; the last 64 bytes are all zero.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let mut block = chain.open(1, &mut vc).unwrap();
+        block.signature = Vec::new(); // wrong length: 0
+        let bytes = to_compact_bytes(&block).unwrap();
+        assert_eq!(bytes.len(), 193);
+        assert_eq!(&bytes[129..193], &[0u8; 64], "lenient form pads with zeros");
+    }
+
+    #[test]
+    fn test_to_compact_bytes_strict_rejects_short_signature() {
+        // PRIMARY LOW-005 PIN: the strict variant returns
+        // SignatureInvalid on a wrong-length signature instead
+        // of silently zero-padding.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let mut block = chain.open(1, &mut vc).unwrap();
+        block.signature = vec![0xAA; 32]; // wrong length: 32
+        let err = to_compact_bytes_strict(&block)
+            .expect_err("strict form must reject wrong-length signature");
+        match err {
+            ArxiaError::SignatureInvalid(msg) => {
+                assert!(msg.contains("64"));
+                assert!(msg.contains("32"));
+            }
+            other => panic!("expected SignatureInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_to_compact_bytes_strict_rejects_long_signature() {
+        // 65-byte signature: also wrong, also rejected.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let mut block = chain.open(1, &mut vc).unwrap();
+        block.signature = vec![0xBB; 65];
+        let err =
+            to_compact_bytes_strict(&block).expect_err("strict form must reject 65-byte signature");
+        assert!(matches!(err, ArxiaError::SignatureInvalid(_)));
+    }
+
+    #[test]
+    fn test_to_compact_bytes_strict_accepts_canonical_64_byte_signature() {
+        // Positive: a freshly-signed block has a 64-byte
+        // signature ; strict form succeeds and produces
+        // byte-identical output to the lenient form.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let block = chain.open(1, &mut vc).unwrap();
+        assert_eq!(block.signature.len(), 64);
+        let lenient = to_compact_bytes(&block).unwrap();
+        let strict = to_compact_bytes_strict(&block).unwrap();
+        assert_eq!(lenient, strict, "byte-identical for canonical input");
+    }
+
+    #[test]
+    fn test_to_compact_bytes_strict_zero_signature_still_rejected() {
+        // Edge: a 0-length signature (Vec::new). Pre-076 this
+        // silently produced zero-padded output ; post-076 the
+        // strict form rejects it.
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        let mut block = chain.open(1, &mut vc).unwrap();
+        block.signature = Vec::new();
+        assert!(to_compact_bytes_strict(&block).is_err());
+        // Lenient form still works (regression guard).
+        assert!(to_compact_bytes(&block).is_ok());
     }
 }
