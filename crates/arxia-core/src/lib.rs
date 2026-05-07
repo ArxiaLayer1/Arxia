@@ -103,4 +103,84 @@ mod cfg_pin_tests {
             );
         }
     }
+
+    // ============================================================
+    // LOW-015 (commit 086) — workspace dependency pinning audit.
+    //
+    // Every entry in `[workspace.dependencies]` MUST be
+    // `major.minor` pinned. No `"*"` wildcards, no floating
+    // `git = "..."` deps, no version-less specs.
+    // ============================================================
+
+    /// Read the workspace root Cargo.toml (3 levels up from this
+    /// file: arxia-core → crates → workspace root).
+    const WORKSPACE_CARGO_TOML: &str = include_str!("../../../Cargo.toml");
+
+    #[test]
+    fn test_workspace_deps_no_wildcard_version() {
+        // PRIMARY LOW-015 PIN: a `"*"` dependency would let
+        // cargo pick any version including pre-release
+        // breaking changes. Reject the pattern at the
+        // text-level. The substring matched is the exact
+        // wildcard form, so e.g. `"1.0"` does not match.
+        assert!(
+            !WORKSPACE_CARGO_TOML.contains("= \"*\""),
+            "workspace deps must not use wildcard `*` versions (LOW-015)"
+        );
+    }
+
+    #[test]
+    fn test_workspace_deps_no_floating_git_deps() {
+        // PRIMARY LOW-015 PIN: a `git = "..."` dependency
+        // pinned only by branch/HEAD bypasses semver entirely
+        // and is a supply-chain risk. The workspace deps must
+        // all come from crates.io (allowed by deny.toml).
+        // Workspace MEMBERS use `path = "..."` which is fine
+        // and unrelated.
+        let in_workspace_deps = WORKSPACE_CARGO_TOML
+            .split("[workspace.dependencies]")
+            .nth(1)
+            .expect("workspace.dependencies section is present")
+            .split("\n[")
+            .next()
+            .expect("section ends at next [...] header");
+        assert!(
+            !in_workspace_deps.contains("git ="),
+            "workspace.dependencies must not contain git deps (LOW-015)"
+        );
+    }
+
+    #[test]
+    fn test_workspace_critical_deps_have_minor_pin() {
+        // The 5 deps that the audit (commit 086) explicitly
+        // upgraded from major-only to major.minor must keep
+        // the minor pin. Pre-fix: `"1"` ; post-fix: `"1.0"`
+        // (or higher minor). A regression that drops the
+        // minor breaks this test.
+        for (dep_name, must_contain) in &[
+            ("ed25519-dalek", "version = \"2.2"),
+            ("blake3", "blake3 = \"1.8"),
+            ("serde", "version = \"1.0"),
+            ("serde_json", "serde_json = \"1.0"),
+            ("bincode", "bincode = \"1.3"),
+            ("tokio", "version = \"1.44"),
+            ("thiserror", "thiserror = \"2.0"),
+        ] {
+            assert!(
+                WORKSPACE_CARGO_TOML.contains(must_contain),
+                "workspace dep {dep_name} must be major.minor pinned (looking for `{must_contain}`)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_workspace_low015_marker_present() {
+        // The audit-acknowledgement comment is part of the
+        // documented contract. Removing it (or losing the
+        // commit-086 reference) signals a regression.
+        assert!(
+            WORKSPACE_CARGO_TOML.contains("LOW-015"),
+            "workspace Cargo.toml must reference LOW-015 in the deps comment"
+        );
+    }
 }
