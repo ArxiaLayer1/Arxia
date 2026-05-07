@@ -1,4 +1,33 @@
 //! Escrow contract for Arxia.
+//!
+//! # Reentrancy safety (LOW-012, commit 083)
+//!
+//! Both [`Escrow::release`] and [`Escrow::refund`] follow a
+//! **check-effects-no-interaction** pattern:
+//!
+//! 1. **Check** — first line of each method tests
+//!    `self.state != EscrowState::Locked` and returns an error
+//!    if the escrow is no longer in the `Locked` state.
+//! 2. **Effects** — only after all signature/timeout checks
+//!    succeed does the state transition (`Released` /
+//!    `Refunded`).
+//! 3. **No interaction** — neither method calls into another
+//!    contract or external function during the protected
+//!    region. There is no callback surface and no
+//!    cross-contract `transfer`-like primitive in the Arxia
+//!    `escrow` model (settlement is performed by the runtime
+//!    based on the resulting state, not by escrow itself).
+//!
+//! Consequence: a re-entrant call to `release` (or `refund`)
+//! from any path — including a future contract that observes
+//! the state transition — finds `self.state == Released` (or
+//! `Refunded`) and rejects with the canonical
+//! `"escrow is not in locked state"` error. The state-machine
+//! transition is the reentrancy guard.
+//!
+//! Tests in this file include explicit reentrancy probes that
+//! call `release` twice (and `refund` twice) on the same
+//! escrow and verify the second call is rejected.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -407,5 +436,91 @@ mod tests {
             "invalid signature"
         );
         assert_eq!(escrow.state, EscrowState::Locked);
+    }
+
+    // ============================================================
+    // LOW-012 (commit 083) — reentrancy safety probes.
+    //
+    // The state-machine pattern (Locked → Released/Refunded) is
+    // the reentrancy guard. A second call to release/refund on
+    // the same escrow must be rejected with "escrow is not in
+    // locked state".
+    // ============================================================
+
+    #[test]
+    fn test_release_twice_rejects_second_call() {
+        // PRIMARY LOW-012 PIN: a second `release` call returns
+        // "escrow is not in locked state" because the first
+        // call transitioned state to Released. State-machine
+        // is the reentrancy guard.
+        let (_, _, sender_hex) = mk_keypair();
+        let (recipient_sk, recipient_pk, recipient_hex) = mk_keypair();
+        let mut escrow = Escrow::new(sender_hex, recipient_hex, 1_000_000, 1000);
+        let msg = escrow.release_message().unwrap();
+        let signature = recipient_sk.sign(&msg).to_bytes();
+        escrow.release(&recipient_pk, &signature).unwrap();
+        assert_eq!(escrow.state, EscrowState::Released);
+        // Second call: must reject.
+        let err = escrow
+            .release(&recipient_pk, &signature)
+            .expect_err("second release must be rejected");
+        assert_eq!(err, "escrow is not in locked state");
+        // State unchanged.
+        assert_eq!(escrow.state, EscrowState::Released);
+    }
+
+    #[test]
+    fn test_refund_twice_rejects_second_call() {
+        let (sender_sk, sender_pk, sender_hex) = mk_keypair();
+        let (_, _, recipient_hex) = mk_keypair();
+        let mut escrow = Escrow::new(sender_hex, recipient_hex, 1_000_000, 1000);
+        let msg = escrow.refund_message().unwrap();
+        let signature = sender_sk.sign(&msg).to_bytes();
+        escrow.refund(&sender_pk, &signature, 1500).unwrap();
+        assert_eq!(escrow.state, EscrowState::Refunded);
+        // Second call: must reject.
+        let err = escrow
+            .refund(&sender_pk, &signature, 1500)
+            .expect_err("second refund must be rejected");
+        assert_eq!(err, "escrow is not in locked state");
+        assert_eq!(escrow.state, EscrowState::Refunded);
+    }
+
+    #[test]
+    fn test_release_after_refund_rejected() {
+        // Once refunded, the escrow cannot be released either —
+        // the Locked → terminal transition is one-shot.
+        let (sender_sk, sender_pk, sender_hex) = mk_keypair();
+        let (recipient_sk, recipient_pk, recipient_hex) = mk_keypair();
+        let mut escrow = Escrow::new(sender_hex, recipient_hex, 1_000_000, 1000);
+        // Refund first.
+        let refund_msg = escrow.refund_message().unwrap();
+        let refund_sig = sender_sk.sign(&refund_msg).to_bytes();
+        escrow.refund(&sender_pk, &refund_sig, 1500).unwrap();
+        assert_eq!(escrow.state, EscrowState::Refunded);
+        // Try to release.
+        let release_msg = escrow.release_message().unwrap();
+        let release_sig = recipient_sk.sign(&release_msg).to_bytes();
+        let err = escrow
+            .release(&recipient_pk, &release_sig)
+            .expect_err("release after refund must be rejected");
+        assert_eq!(err, "escrow is not in locked state");
+    }
+
+    #[test]
+    fn test_refund_after_release_rejected() {
+        // Symmetric: once released, refund is also blocked.
+        let (sender_sk, sender_pk, sender_hex) = mk_keypair();
+        let (recipient_sk, recipient_pk, recipient_hex) = mk_keypair();
+        let mut escrow = Escrow::new(sender_hex, recipient_hex, 1_000_000, 1000);
+        let release_msg = escrow.release_message().unwrap();
+        let release_sig = recipient_sk.sign(&release_msg).to_bytes();
+        escrow.release(&recipient_pk, &release_sig).unwrap();
+        let refund_msg = escrow.refund_message().unwrap();
+        let refund_sig = sender_sk.sign(&refund_msg).to_bytes();
+        let err = escrow
+            .refund(&sender_pk, &refund_sig, 1500)
+            .expect_err("refund after release must be rejected");
+        assert_eq!(err, "escrow is not in locked state");
     }
 }
