@@ -9,3 +9,4 @@ authors = []
 
 [dependencies]
 arxia-core = { path = "../arxia-core" }
+arxia-crypto = { path = "../arxia-crypto" }
