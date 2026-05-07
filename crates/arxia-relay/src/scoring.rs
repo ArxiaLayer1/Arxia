@@ -69,6 +69,68 @@ use arxia_core::constants::RELAY_SCORING_WINDOW_DAYS;
 use crate::receipt::{RelayReceipt, RelayReceiptError};
 use crate::slashing::{SlashingError, SlashingProof};
 
+/// Required length of a canonical `relay_id` (Ed25519 pubkey hex
+/// encoding: 32 raw bytes × 2 hex chars per byte).
+pub const RELAY_ID_LEN: usize = 64;
+
+/// Errors returned by [`RelayScore::try_new`] when validating
+/// a candidate `relay_id`.
+///
+/// LOW-007 (commit 078): typed validation at the trust boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayIdError {
+    /// The `relay_id` is not exactly [`RELAY_ID_LEN`] characters long.
+    InvalidLength {
+        /// Length the caller supplied.
+        got: usize,
+    },
+    /// A byte at `byte_offset` is not a hex digit (`0-9`, `a-f`,
+    /// `A-F`).
+    InvalidHex {
+        /// Offset within the string (0-indexed).
+        byte_offset: usize,
+        /// The offending byte.
+        byte: u8,
+    },
+}
+
+impl std::fmt::Display for RelayIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLength { got } => write!(
+                f,
+                "relay_id must be exactly {RELAY_ID_LEN} hex chars, got {got}"
+            ),
+            Self::InvalidHex { byte_offset, byte } => write!(
+                f,
+                "relay_id byte 0x{byte:02X} at offset {byte_offset} is not a hex digit"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RelayIdError {}
+
+/// Validate that `relay_id` is a canonical 64-char hex-encoded
+/// Ed25519 pubkey. Used by [`RelayScore::try_new`].
+fn validate_relay_id(relay_id: &str) -> Result<(), RelayIdError> {
+    if relay_id.len() != RELAY_ID_LEN {
+        return Err(RelayIdError::InvalidLength {
+            got: relay_id.len(),
+        });
+    }
+    for (i, b) in relay_id.bytes().enumerate() {
+        let is_hex = b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || (b'A'..=b'F').contains(&b);
+        if !is_hex {
+            return Err(RelayIdError::InvalidHex {
+                byte_offset: i,
+                byte: b,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Reputation score for a relay node.
 #[derive(Debug, Clone)]
 pub struct RelayScore {
@@ -138,6 +200,11 @@ impl RelayScore {
     pub const ROLLING_BASELINE: i64 = 100;
 
     /// Create a new relay score with default values.
+    ///
+    /// **Lenient** — accepts any `String` as `relay_id` for
+    /// backward compatibility. Use [`RelayScore::try_new`] to
+    /// validate that `relay_id` is a 64-char hex-encoded Ed25519
+    /// pubkey before construction (LOW-007).
     pub fn new(relay_id: String) -> Self {
         Self {
             relay_id,
@@ -148,6 +215,31 @@ impl RelayScore {
             rolling_events: VecDeque::new(),
             per_target_counts: HashMap::new(),
         }
+    }
+
+    /// Create a new relay score, validating that `relay_id` is a
+    /// 64-character hex-encoded Ed25519 public key.
+    ///
+    /// LOW-007 (commit 078): the lenient [`RelayScore::new`]
+    /// accepts any `String`, including malformed identifiers
+    /// that wouldn't match the canonical pubkey-hex format used
+    /// elsewhere in the workspace (e.g. `arxia_lattice::AccountChain::id`
+    /// returns a 64-char hex string). Strict callers can use
+    /// this constructor to fail at construction time instead of
+    /// at the next `record_success` call.
+    ///
+    /// Validation: `relay_id` must be exactly 64 ASCII hex chars
+    /// (case-insensitive, both upper and lower accepted).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(RelayIdError::InvalidLength { got })` if the
+    /// length is not 64, or
+    /// `Err(RelayIdError::InvalidHex { byte_offset, byte })` if a
+    /// byte is not a hex digit.
+    pub fn try_new(relay_id: String) -> Result<Self, RelayIdError> {
+        validate_relay_id(&relay_id)?;
+        Ok(Self::new(relay_id))
     }
 
     /// Record a successful relay, backed by a signed [`RelayReceipt`].
@@ -1391,5 +1483,102 @@ mod tests {
                 "default and explicit-threshold must agree at TRUST_THRESHOLD for score={s}"
             );
         }
+    }
+
+    // ============================================================
+    // LOW-007 (commit 078) — `relay_id` pubkey-hex validation.
+    // The pre-fix `RelayScore::new` accepts any String. The new
+    // `try_new` validates 64-char hex (Ed25519 pubkey hex
+    // encoding). Backward-compat: `new` unchanged.
+    // ============================================================
+
+    #[test]
+    fn test_relay_id_len_constant_pinned() {
+        // PRIMARY LOW-007 PIN: the symbolic length matches the
+        // pubkey-hex encoding (32 bytes × 2 hex = 64).
+        assert_eq!(RELAY_ID_LEN, 64);
+    }
+
+    #[test]
+    fn test_try_new_accepts_canonical_64_char_hex() {
+        // Lowercase hex.
+        let valid = "a".repeat(64);
+        let s = RelayScore::try_new(valid.clone()).unwrap();
+        assert_eq!(s.relay_id, valid);
+    }
+
+    #[test]
+    fn test_try_new_accepts_uppercase_hex() {
+        // Uppercase hex must also be accepted (case-insensitive).
+        let valid = "DEADBEEF".repeat(8);
+        assert_eq!(valid.len(), 64);
+        assert!(RelayScore::try_new(valid).is_ok());
+    }
+
+    #[test]
+    fn test_try_new_accepts_mixed_case_hex() {
+        // Mixed-case is also valid. Build a 64-char string of
+        // mixed-case hex digits explicitly so we don't depend
+        // on `.take()` from a too-short literal.
+        let valid: String = (0..64)
+            .map(|i| match i % 6 {
+                0 => '0',
+                1 => '9',
+                2 => 'a',
+                3 => 'F',
+                4 => 'B',
+                _ => 'c',
+            })
+            .collect();
+        assert_eq!(valid.len(), 64);
+        assert!(RelayScore::try_new(valid).is_ok());
+    }
+
+    #[test]
+    fn test_try_new_rejects_too_short_relay_id() {
+        let err =
+            RelayScore::try_new("a".repeat(63)).expect_err("63-char relay_id must be rejected");
+        match err {
+            RelayIdError::InvalidLength { got } => assert_eq!(got, 63),
+            other => panic!("expected InvalidLength, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_try_new_rejects_too_long_relay_id() {
+        let err =
+            RelayScore::try_new("a".repeat(65)).expect_err("65-char relay_id must be rejected");
+        assert!(matches!(err, RelayIdError::InvalidLength { got: 65 }));
+    }
+
+    #[test]
+    fn test_try_new_rejects_empty_relay_id() {
+        let err = RelayScore::try_new(String::new()).expect_err("empty relay_id must be rejected");
+        assert!(matches!(err, RelayIdError::InvalidLength { got: 0 }));
+    }
+
+    #[test]
+    fn test_try_new_rejects_non_hex_byte() {
+        // 64 chars but byte at offset 32 is 'g' (not a hex digit).
+        let mut bytes = vec![b'a'; 64];
+        bytes[32] = b'g';
+        let s = String::from_utf8(bytes).expect("ASCII is valid UTF-8");
+        let err = RelayScore::try_new(s).expect_err("non-hex byte must be rejected");
+        match err {
+            RelayIdError::InvalidHex { byte_offset, byte } => {
+                assert_eq!(byte_offset, 32);
+                assert_eq!(byte, b'g');
+            }
+            other => panic!("expected InvalidHex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_legacy_new_still_accepts_any_string_for_backward_compat() {
+        // Backward-compat pin: `new` unchanged. Existing callers
+        // passing arbitrary identifiers continue to work.
+        let weird = "this is not a hex string".to_string();
+        let s = RelayScore::new(weird.clone());
+        assert_eq!(s.relay_id, weird);
     }
 }
