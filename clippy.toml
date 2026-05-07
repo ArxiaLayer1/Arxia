@@ -1,1 +1,10 @@
+# clippy configuration for the Arxia workspace.
+#
+# LOW-014 (commit 084): reviewed and pinned. The MSRV below
+# matches `rust-toolchain.toml` and the workspace Cargo.toml ;
+# bumping it requires updating both files in lock-step.
+
+# Minimum supported Rust version. Pinned to 1.85.0 to keep
+# ESP32-targets compatible (esp-idf-sys's MSRV ladder lags the
+# stable channel ; check before bumping).
 msrv = "1.85.0"
