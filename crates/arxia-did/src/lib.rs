@@ -169,6 +169,30 @@ impl std::fmt::Display for ParsedArxiaDid {
     }
 }
 
+impl std::str::FromStr for ParsedArxiaDid {
+    type Err = ArxiaError;
+
+    /// LOW-010 (commit 079): standard `FromStr` impl that
+    /// delegates to [`parse_did`]. Returned `Err` is
+    /// `ArxiaError::InvalidKey(reason)` exactly as `parse_did`
+    /// produces — no information loss compared to the
+    /// function-style call.
+    ///
+    /// This makes idiomatic patterns work:
+    ///
+    /// ```
+    /// use arxia_did::ParsedArxiaDid;
+    /// use std::str::FromStr;
+    ///
+    /// let s = "did:arxia:badbase58";
+    /// let result: Result<ParsedArxiaDid, _> = s.parse();
+    /// assert!(result.is_err());
+    /// ```
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_did(s)
+    }
+}
+
 /// Parse a DID string and return a [`ParsedArxiaDid`].
 ///
 /// Validation:
@@ -497,5 +521,78 @@ mod tests {
         let lenient = did.identifier();
         let strict = did.identifier_strict().unwrap();
         assert_eq!(lenient, strict);
+    }
+
+    // ============================================================
+    // LOW-010 (commit 079) — `FromStr` impl for `ParsedArxiaDid`.
+    // The pre-fix path required calling `parse_did(s)` directly ;
+    // adding `FromStr` makes idiomatic `s.parse()` work and
+    // delegates to the same parser without information loss.
+    // ============================================================
+
+    #[test]
+    fn test_fromstr_parses_canonical_did() {
+        // PRIMARY LOW-010 PIN: a canonical DID built from a
+        // pubkey parses via `FromStr` and equals the
+        // `parse_did(...)` result.
+        use std::str::FromStr;
+        let pk = keypair_a();
+        let did = ArxiaDid::from_public_key(&pk).unwrap();
+        let parsed_via_fn = parse_did(did.as_str()).unwrap();
+        let parsed_via_fromstr = ParsedArxiaDid::from_str(did.as_str()).unwrap();
+        assert_eq!(parsed_via_fn, parsed_via_fromstr);
+    }
+
+    #[test]
+    fn test_fromstr_idiomatic_dot_parse_works() {
+        // Pin the `.parse::<T>()` syntax works as expected.
+        let pk = keypair_a();
+        let did = ArxiaDid::from_public_key(&pk).unwrap();
+        let s = did.as_str();
+        let parsed: ParsedArxiaDid = s.parse().expect("canonical DID must parse");
+        assert!(parsed.matches_pubkey(&pk));
+    }
+
+    #[test]
+    fn test_fromstr_returns_invalid_key_on_missing_prefix() {
+        use std::str::FromStr;
+        let err = ParsedArxiaDid::from_str("not-a-did").expect_err("non-DID string must reject");
+        match err {
+            ArxiaError::InvalidKey(msg) => assert!(msg.contains("prefix")),
+            other => panic!("expected InvalidKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fromstr_returns_invalid_key_on_bad_base58() {
+        use std::str::FromStr;
+        // Prefix is correct but identifier portion has invalid
+        // base58 characters (0OIl are excluded from base58).
+        let err =
+            ParsedArxiaDid::from_str("did:arxia:0OIl0OIl").expect_err("bad base58 must reject");
+        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+    }
+
+    #[test]
+    fn test_fromstr_returns_invalid_key_on_wrong_length_after_decode() {
+        use std::str::FromStr;
+        // Valid prefix and valid base58, but decoded length
+        // is not 32 bytes.
+        let s = format!("{}{}", DID_PREFIX, "abc"); // decodes to 2 bytes
+        let err = ParsedArxiaDid::from_str(&s).expect_err("wrong decoded length must reject");
+        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+    }
+
+    #[test]
+    fn test_display_round_trip_via_fromstr() {
+        // Display → FromStr round-trip pin: the formatted
+        // string parses back to an equal value.
+        use std::str::FromStr;
+        let pk = keypair_a();
+        let did = ArxiaDid::from_public_key(&pk).unwrap();
+        let parsed = parse_did(did.as_str()).unwrap();
+        let formatted = format!("{parsed}");
+        let reparsed = ParsedArxiaDid::from_str(&formatted).unwrap();
+        assert_eq!(parsed, reparsed);
     }
 }
