@@ -1,9 +1,20 @@
+# cargo-deny policy for the Arxia workspace.
+#
+# LOW-014 (commit 084): reviewed and pinned. The settings below
+# are the audit-acknowledged baseline ; changes require an
+# explicit security-review commit citing this file.
+
 [advisories]
+# Reject any dependency with a known RUSTSEC vulnerability.
 vulnerability = "deny"
+# Warn (don't fail) on unmaintained dependencies. Promotion to
+# "deny" is desirable once the alternative selection is settled.
 unmaintained = "warn"
 
 [licenses]
+# All workspace dependencies must declare a license.
 unlicensed = "deny"
+# Permitted licenses (alphabetised):
 allow = [
     "MIT",
     "Apache-2.0",
@@ -16,14 +27,22 @@ allow = [
     "Zlib",
     "BSL-1.0",
 ]
+# Reject GPL / LGPL / AGPL — Arxia is an Apache-2.0 / MIT
+# dual-licensed project and cannot vendor copyleft code.
 copyleft = "deny"
 
 [bans]
+# Warn on multiple versions of the same dep (common with
+# transitive deps ; not always actionable but worth surfacing).
 multiple-versions = "warn"
+# Reject wildcard version requirements (e.g. `foo = "*"`) —
+# they bypass MSRV / version-pinning hygiene.
 wildcards = "deny"
 
 [sources]
+# Reject unknown registries and unknown git remotes.
 unknown-registry = "deny"
 unknown-git = "deny"
+# Only crates.io is permitted as an upstream source.
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
