@@ -45,14 +45,46 @@
 //! boundary. Every transport binding (`arxia-transport`, future
 //! LoRa / BLE / SMS adapters) inherits both checks transparently.
 
+//! # Protoc availability flag (LOW-008, commit 080)
+//!
+//! `build.rs` checks for `protoc` and either compiles the
+//! `.proto` definitions normally OR writes a stub
+//! (`// protoc not found - stub generated`) and emits a
+//! `cargo:warning`. To make the stub mode runtime-detectable,
+//! `build.rs` also sets one of two cfg flags:
+//!
+//! - `arxia_proto_real` — protoc was found, real types exist.
+//! - `arxia_proto_stub` — protoc was missing, stub generated.
+//!
+//! The constant [`PROTO_STUB_ACTIVE`] mirrors the cfg as a
+//! const bool so callers can introspect at runtime without
+//! using `cfg!()` macros.
+
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod validation;
 
 pub use validation::{
-    require_envelope_payload, validate_transport_frame_bytes, ProtoError, MAX_TRANSPORT_FRAME_BYTES,
+    require_envelope_payload, validate_proto_decode_depth, validate_transport_frame_bytes,
+    ProtoError, MAX_PROTO_DECODE_DEPTH, MAX_TRANSPORT_FRAME_BYTES,
 };
+
+/// Whether the `protoc`-stub fallback was active at build time.
+///
+/// LOW-008 (commit 080): `true` means `protoc` was missing and
+/// the generated protobuf module is a stub ; `false` means the
+/// real types are available. Callers that depend on real
+/// prost-generated types should assert `!PROTO_STUB_ACTIVE` (or
+/// gate at the cfg level via `#[cfg(arxia_proto_real)]`).
+#[cfg(arxia_proto_real)]
+pub const PROTO_STUB_ACTIVE: bool = false;
+
+/// Whether the `protoc`-stub fallback was active at build time.
+///
+/// See the `arxia_proto_real` variant above for details.
+#[cfg(arxia_proto_stub)]
+pub const PROTO_STUB_ACTIVE: bool = true;
 
 /// Generated protobuf types for the Arxia protocol.
 #[allow(missing_docs)]
