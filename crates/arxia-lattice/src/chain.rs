@@ -181,6 +181,15 @@ impl AccountChain {
                 max: arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT,
             });
         }
+        // Defense-in-depth: reject low-order / off-curve account
+        // pubkeys at chain-construction time. Mirrors the strict
+        // checks at `validation::verify_block` (signature time)
+        // and `block::Block::compute_hash` (hash time). The
+        // `verifying_key` here is derived from a freshly-generated
+        // signing key (in `AccountChain::new`), so this defense
+        // only fires if a future code-toucher reaches in and
+        // overwrites `verifying_key` with adversarial bytes.
+        arxia_crypto::validate_pubkey_strict(&self.verifying_key.to_bytes())?;
         let sid = self.public_key_hex[..8].to_string();
         vclock.tick(&sid);
         self.balance = initial_balance;

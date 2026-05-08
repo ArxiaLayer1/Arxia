@@ -97,6 +97,19 @@ impl Block {
         nonce: u64,
         timestamp: u64,
     ) -> Result<String, ArxiaError> {
+        // Defense-in-depth: reject low-order / off-curve account
+        // pubkeys at hash-construction time. The strict verify
+        // path in `validation::verify_block` already enforces this
+        // at signature-check time ; rejecting earlier prevents an
+        // attacker from constructing a Block with a degenerate
+        // pubkey at all (and hence prevents the resulting block
+        // from entering any storage / gossip / persistence path
+        // even before it reaches verify).
+        let pubkey_bytes: [u8; 32] = hex::decode(account)
+            .map_err(|e| ArxiaError::InvalidKey(e.to_string()))?
+            .try_into()
+            .map_err(|_| ArxiaError::InvalidKey("bad key length".into()))?;
+        arxia_crypto::validate_pubkey_strict(&pubkey_bytes)?;
         let bt_json = serde_json::to_string(block_type)
             .map_err(|e| ArxiaError::Serialization(format!("BlockType: {e}")))?;
         let content = format!(
@@ -111,14 +124,25 @@ impl Block {
 mod tests {
     use super::*;
 
+    /// Helper: produce a hex-encoded Ed25519 pubkey that passes
+    /// `validate_pubkey_strict`. Pre-fix the tests below used
+    /// short mock strings ("abcd", "x", "a"); post-fix the
+    /// defense-in-depth check in `compute_hash` rejects any
+    /// account that isn't a valid 32-byte Curve25519 point.
+    fn valid_pk_hex() -> String {
+        let (_sk, vk) = arxia_crypto::generate_keypair();
+        hex::encode(vk.to_bytes())
+    }
+
     /// MED-001 PRIMARY POSITIVE PIN: each canonical `BlockType`
     /// variant serializes successfully. A future regression
     /// (e.g. someone adds a non-Serialize field to one of these
     /// variants) trips this test before reaching CI.
     #[test]
     fn test_compute_hash_succeeds_on_open() {
+        let pk = valid_pk_hex();
         let h = Block::compute_hash(
-            "abcd",
+            &pk,
             "",
             &BlockType::Open {
                 initial_balance: 100,
@@ -133,8 +157,9 @@ mod tests {
 
     #[test]
     fn test_compute_hash_succeeds_on_send() {
+        let pk = valid_pk_hex();
         let h = Block::compute_hash(
-            "abcd",
+            &pk,
             "prev",
             &BlockType::Send {
                 destination: "dest".to_string(),
@@ -150,8 +175,9 @@ mod tests {
 
     #[test]
     fn test_compute_hash_succeeds_on_receive() {
+        let pk = valid_pk_hex();
         let h = Block::compute_hash(
-            "abcd",
+            &pk,
             "prev",
             &BlockType::Receive {
                 source_hash: "src".to_string(),
@@ -165,8 +191,9 @@ mod tests {
 
     #[test]
     fn test_compute_hash_succeeds_on_revoke() {
+        let pk = valid_pk_hex();
         let h = Block::compute_hash(
-            "abcd",
+            &pk,
             "prev",
             &BlockType::Revoke {
                 credential_hash: "cred".to_string(),
@@ -186,8 +213,9 @@ mod tests {
         // test (the `?` operator and Err pattern require
         // Result).
         fn assert_returns_result() -> Result<(), ArxiaError> {
+            let pk = super::tests::valid_pk_hex();
             let _h =
-                Block::compute_hash("x", "", &BlockType::Open { initial_balance: 0 }, 0, 1, 0)?;
+                Block::compute_hash(&pk, "", &BlockType::Open { initial_balance: 0 }, 0, 1, 0)?;
             Ok(())
         }
         assert!(assert_returns_result().is_ok());
@@ -198,9 +226,10 @@ mod tests {
         // Two calls with identical inputs produce identical
         // output — pin against any future change that
         // accidentally introduces nondeterminism.
-        let h1 = Block::compute_hash("a", "p", &BlockType::Open { initial_balance: 1 }, 1, 1, 1)
+        let pk = valid_pk_hex();
+        let h1 = Block::compute_hash(&pk, "p", &BlockType::Open { initial_balance: 1 }, 1, 1, 1)
             .unwrap();
-        let h2 = Block::compute_hash("a", "p", &BlockType::Open { initial_balance: 1 }, 1, 1, 1)
+        let h2 = Block::compute_hash(&pk, "p", &BlockType::Open { initial_balance: 1 }, 1, 1, 1)
             .unwrap();
         assert_eq!(h1, h2);
     }
@@ -211,8 +240,9 @@ mod tests {
         // even when account/previous/balance/nonce/timestamp
         // are equal. Pin the BlockType-discriminator
         // contribution to the hash.
+        let pk = valid_pk_hex();
         let h_open = Block::compute_hash(
-            "a",
+            &pk,
             "",
             &BlockType::Open {
                 initial_balance: 100,
@@ -223,7 +253,7 @@ mod tests {
         )
         .unwrap();
         let h_send = Block::compute_hash(
-            "a",
+            &pk,
             "",
             &BlockType::Send {
                 destination: "x".to_string(),
