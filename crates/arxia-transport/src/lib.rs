@@ -37,9 +37,14 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod reassembly;
 pub mod sim;
 pub mod traits;
 
+pub use reassembly::{
+    Fragment, FragmentHeader, Reassembler, ReassemblyError, FRAGMENT_DOMAIN,
+    MAX_INFLIGHT_MESSAGES_PER_PEER,
+};
 pub use sim::simulated::{SimulatedTransport, DEFAULT_INBOX_CAPACITY, DEFAULT_OUTBOX_CAPACITY};
 pub use traits::{
     SignedTransportMessage, TransportError, TransportMessage, TransportTrait,
