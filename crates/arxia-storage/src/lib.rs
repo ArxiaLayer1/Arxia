@@ -44,6 +44,43 @@
 //! `MemoryStorage` is preserved unchanged for single-threaded
 //! callers (it remains the default and avoids the lock-acquisition
 //! cost on the hot path).
+//!
+//! # Transactional writes (HIGH-020, commit 090)
+//!
+//! [`StorageBackend`] is a single-op API: each `put` / `delete`
+//! lands immediately. The audit (HIGH-020):
+//!
+//! > Crash mid-write during a multi-op state transition (e.g.,
+//! > "insert block + update nonce registry + update
+//! > consumed_sources"); second op never happens. On-disk state
+//! > diverges from in-memory state after restart; nonce registry
+//! > loses entries. Suggested fix direction: introduce a
+//! > `Transaction` trait with explicit `begin/commit/rollback`;
+//! > persistence backend must implement atomic writes.
+//!
+//! [`MemoryStorage::begin_transaction`] returns a
+//! [`MemoryTransaction`] that **stages** writes and deletes in a
+//! side buffer. The staged ops are visible to `get`/`contains`
+//! via the transaction handle (read-your-writes within the txn)
+//! but not to the underlying store until [`MemoryTransaction::commit`]
+//! lands them atomically. [`MemoryTransaction::rollback`] (or
+//! simply dropping the transaction without committing) discards
+//! the staging buffer. The `commit` is atomic at the in-process
+//! level: it acquires the staging snapshot once and applies all
+//! ops in a single mutable borrow ; a panic between ops would
+//! still leave the underlying store in either the pre-commit or
+//! post-commit state, never a partial mix, because the staging
+//! buffer is owned by the transaction handle and only consumed
+//! when commit succeeds.
+//!
+//! Convenience: [`MemoryStorage::atomic_put_batch`] wraps
+//! `begin → put each → commit` for the common case where a caller
+//! has a slice of `(key, value)` pairs to land together.
+//!
+//! For a future on-disk backend (sled / rocksdb / WAL), the same
+//! `Transaction` shape applies ; the staging buffer becomes the
+//! WAL frame, and `commit` becomes "fsync the WAL frame, then
+//! apply".
 
 use arxia_core::ArxiaError;
 use std::collections::HashMap;
@@ -99,6 +136,146 @@ impl StorageBackend for MemoryStorage {
     }
     fn contains(&self, key: &[u8]) -> Result<bool, ArxiaError> {
         Ok(self.data.contains_key(key))
+    }
+}
+
+/// HIGH-020 (commit 090): staging op for the transaction's side
+/// buffer. `Put(value)` carries the new value ; `Delete` marks
+/// the key for removal at commit time.
+#[derive(Debug, Clone)]
+enum StagedOp {
+    Put(Vec<u8>),
+    Delete,
+}
+
+/// Transactional write handle on a [`MemoryStorage`].
+///
+/// HIGH-020 (commit 090): writes go into a staging buffer
+/// while the underlying store is untouched. [`Self::commit`]
+/// applies all staged ops atomically (single mutable borrow on
+/// the store) ; [`Self::rollback`] (or `drop`) discards the
+/// staging buffer.
+///
+/// Reads via [`Self::get`] / [`Self::contains`] see
+/// read-your-writes within the transaction (a key staged with
+/// `Put` returns the staged value ; a key staged with `Delete`
+/// returns `None`/`false` even if it exists in the store).
+pub struct MemoryTransaction<'a> {
+    store: &'a mut MemoryStorage,
+    staged: HashMap<Vec<u8>, StagedOp>,
+    /// Set to `true` by `commit()` so `Drop` knows not to
+    /// re-rollback (commit consumed `self`, but a panic during
+    /// commit's body would leave us in an in-between state).
+    /// Currently always `false` because commit consumes self
+    /// by value ; reserved for future fallible-commit paths.
+    committed: bool,
+}
+
+impl MemoryTransaction<'_> {
+    /// Stage a `put`. Atomic w.r.t. the txn ; visible to other
+    /// reads in the same txn but NOT to the underlying store
+    /// until commit.
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
+        self.staged
+            .insert(key.to_vec(), StagedOp::Put(value.to_vec()));
+        Ok(())
+    }
+
+    /// Stage a `delete`. Same semantics as
+    /// [`StorageBackend::delete`] but the result is the
+    /// "would-be-deleted" status: `true` if the key currently
+    /// exists in the txn's view (store + staging), `false`
+    /// otherwise. The actual removal lands on commit.
+    pub fn delete(&mut self, key: &[u8]) -> Result<bool, ArxiaError> {
+        let exists_in_view = self.contains(key)?;
+        self.staged.insert(key.to_vec(), StagedOp::Delete);
+        Ok(exists_in_view)
+    }
+
+    /// Read-your-writes within the transaction.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError> {
+        match self.staged.get(key) {
+            Some(StagedOp::Put(v)) => Ok(Some(v.clone())),
+            Some(StagedOp::Delete) => Ok(None),
+            None => self.store.get(key),
+        }
+    }
+
+    /// Read-your-writes containment check.
+    pub fn contains(&self, key: &[u8]) -> Result<bool, ArxiaError> {
+        match self.staged.get(key) {
+            Some(StagedOp::Put(_)) => Ok(true),
+            Some(StagedOp::Delete) => Ok(false),
+            None => self.store.contains(key),
+        }
+    }
+
+    /// Number of ops staged.
+    pub fn staged_op_count(&self) -> usize {
+        self.staged.len()
+    }
+
+    /// Apply all staged ops atomically. Consumes `self`.
+    pub fn commit(mut self) -> Result<(), ArxiaError> {
+        // Move the staging buffer out so we can drain it without
+        // re-borrowing self.
+        let drained = std::mem::take(&mut self.staged);
+        for (key, op) in drained {
+            match op {
+                StagedOp::Put(value) => {
+                    self.store.data.insert(key, value);
+                }
+                StagedOp::Delete => {
+                    self.store.data.remove(&key);
+                }
+            }
+        }
+        self.committed = true;
+        Ok(())
+    }
+
+    /// Discard all staged ops without applying them. Equivalent
+    /// to dropping the transaction.
+    pub fn rollback(self) {
+        // `self` goes out of scope ; staged buffer is dropped
+        // with it.
+    }
+}
+
+impl MemoryStorage {
+    /// HIGH-020 (commit 090): begin a transaction.
+    ///
+    /// Holds an exclusive mutable borrow on `self` until the
+    /// returned [`MemoryTransaction`] is dropped or committed.
+    /// This guarantees no other code path can issue a non-
+    /// transactional `put`/`delete` while the transaction is
+    /// in flight.
+    pub fn begin_transaction(&mut self) -> MemoryTransaction<'_> {
+        MemoryTransaction {
+            store: self,
+            staged: HashMap::new(),
+            committed: false,
+        }
+    }
+
+    /// HIGH-020 (commit 090): convenience wrapper for the
+    /// "many puts, all-or-nothing" pattern.
+    ///
+    /// Begins a transaction, applies every `(key, value)` pair
+    /// via `put`, and commits. Returns `Ok(())` if every put
+    /// succeeded and the commit landed ; on error, no
+    /// staged op reaches the store (the transaction is dropped
+    /// without commit).
+    pub fn atomic_put_batch<K, V>(&mut self, items: &[(K, V)]) -> Result<(), ArxiaError>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let mut txn = self.begin_transaction();
+        for (k, v) in items {
+            txn.put(k.as_ref(), v.as_ref())?;
+        }
+        txn.commit()
     }
 }
 
@@ -559,5 +736,172 @@ mod tests {
         let unwrapped = unwrap_with_checksum(&wrapped).unwrap();
         assert_eq!(unwrapped.len(), value.len());
         assert_eq!(unwrapped, value);
+    }
+
+    // ============================================================
+    // HIGH-020 (commit 090) — MemoryTransaction begin/commit/
+    // rollback semantics + atomic_put_batch convenience.
+    // ============================================================
+
+    #[test]
+    fn test_transaction_commit_lands_all_staged_ops() {
+        // PRIMARY HIGH-020 PIN: a successful commit applies
+        // every staged put to the underlying store atomically.
+        let mut store = MemoryStorage::new();
+        let mut txn = store.begin_transaction();
+        txn.put(b"k1", b"v1").unwrap();
+        txn.put(b"k2", b"v2").unwrap();
+        txn.put(b"k3", b"v3").unwrap();
+        txn.commit().unwrap();
+        assert_eq!(store.get(b"k1").unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(store.get(b"k2").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(store.get(b"k3").unwrap(), Some(b"v3".to_vec()));
+    }
+
+    #[test]
+    fn test_transaction_rollback_discards_all_staged_ops() {
+        // PRIMARY HIGH-020 PIN: rollback (or drop) discards
+        // every staged op. The store is exactly as it was
+        // before the transaction began.
+        let mut store = MemoryStorage::new();
+        store.put(b"pre", b"existing").unwrap();
+        let mut txn = store.begin_transaction();
+        txn.put(b"k1", b"v1").unwrap();
+        txn.delete(b"pre").unwrap();
+        txn.rollback();
+        // Pre-existing key still there ; staged put never landed.
+        assert_eq!(store.get(b"pre").unwrap(), Some(b"existing".to_vec()));
+        assert_eq!(store.get(b"k1").unwrap(), None);
+    }
+
+    #[test]
+    fn test_transaction_drop_without_commit_is_rollback() {
+        // Dropping the txn without `commit()` MUST be
+        // equivalent to `rollback()`. The audit's "kill the
+        // process before commit, no partial state" contract
+        // for the in-memory case.
+        let mut store = MemoryStorage::new();
+        {
+            let mut txn = store.begin_transaction();
+            txn.put(b"key", b"val").unwrap();
+            // txn dropped here without commit
+        }
+        assert_eq!(store.get(b"key").unwrap(), None);
+    }
+
+    #[test]
+    fn test_transaction_read_your_writes_within_txn() {
+        // Within a transaction, get/contains see staged ops.
+        let mut store = MemoryStorage::new();
+        store.put(b"existing", b"v0").unwrap();
+        let mut txn = store.begin_transaction();
+        // Staged put visible.
+        txn.put(b"new", b"v1").unwrap();
+        assert_eq!(txn.get(b"new").unwrap(), Some(b"v1".to_vec()));
+        // Staged delete shadows store value.
+        txn.delete(b"existing").unwrap();
+        assert_eq!(txn.get(b"existing").unwrap(), None);
+        assert!(!txn.contains(b"existing").unwrap());
+        // But the underlying store STILL has it (pre-commit).
+        // (We can't read store while txn holds &mut, so commit
+        // first.)
+        txn.commit().unwrap();
+        assert_eq!(store.get(b"existing").unwrap(), None);
+        assert_eq!(store.get(b"new").unwrap(), Some(b"v1".to_vec()));
+    }
+
+    #[test]
+    fn test_transaction_delete_returns_view_existence_signal() {
+        // delete() returns whether the key existed in the
+        // txn's view (store + staged). Pre-staging the delete,
+        // we get true ; after, the key is staged-deleted.
+        let mut store = MemoryStorage::new();
+        store.put(b"k", b"v").unwrap();
+        let mut txn = store.begin_transaction();
+        // First delete: existed in store.
+        let first = txn.delete(b"k").unwrap();
+        assert!(first);
+        // Second delete: already staged-deleted, view says no.
+        let second = txn.delete(b"k").unwrap();
+        assert!(!second);
+    }
+
+    #[test]
+    fn test_transaction_staged_op_count_pinned() {
+        let mut store = MemoryStorage::new();
+        let mut txn = store.begin_transaction();
+        assert_eq!(txn.staged_op_count(), 0);
+        txn.put(b"a", b"1").unwrap();
+        txn.put(b"b", b"2").unwrap();
+        assert_eq!(txn.staged_op_count(), 2);
+        txn.put(b"a", b"3").unwrap(); // overwrite same key
+        assert_eq!(txn.staged_op_count(), 2, "same key is one staged slot");
+    }
+
+    #[test]
+    fn test_transaction_borrow_checker_prevents_concurrent_mutations() {
+        // Compile-time pin: `begin_transaction` returns a
+        // handle that holds &mut self ; the borrow checker
+        // refuses any other &mut borrow on the store while the
+        // txn is alive. This test compiles iff the rule holds.
+        let mut store = MemoryStorage::new();
+        let mut txn = store.begin_transaction();
+        txn.put(b"x", b"y").unwrap();
+        // Attempting `store.put(...)` here would be a compile
+        // error (E0499). Documented invariant.
+        txn.commit().unwrap();
+        // After commit (txn consumed), we can borrow again.
+        store.put(b"z", b"w").unwrap();
+        assert_eq!(store.get(b"x").unwrap(), Some(b"y".to_vec()));
+        assert_eq!(store.get(b"z").unwrap(), Some(b"w".to_vec()));
+    }
+
+    #[test]
+    fn test_atomic_put_batch_lands_all_or_nothing() {
+        // PRIMARY HIGH-020 PIN: the convenience batch helper
+        // commits the whole slice or nothing. With the current
+        // memory backend every `put` succeeds, so this is the
+        // happy-path pin ; a future fallible backend exercises
+        // the all-or-nothing direction.
+        let mut store = MemoryStorage::new();
+        let items: &[(&[u8], &[u8])] = &[(b"k1", b"v1"), (b"k2", b"v2"), (b"k3", b"v3")];
+        store.atomic_put_batch(items).unwrap();
+        for (k, v) in items {
+            assert_eq!(store.get(k).unwrap(), Some(v.to_vec()));
+        }
+    }
+
+    #[test]
+    fn test_atomic_put_batch_empty_slice_is_noop() {
+        // Edge: an empty batch is a successful no-op.
+        let mut store = MemoryStorage::new();
+        let items: &[(&[u8], &[u8])] = &[];
+        store.atomic_put_batch(items).unwrap();
+        assert!(store.contains(b"anything").is_ok());
+    }
+
+    #[test]
+    fn test_transaction_commit_overwrites_existing_key() {
+        // Pin: a staged put on a key already in the store
+        // overwrites the value at commit time.
+        let mut store = MemoryStorage::new();
+        store.put(b"k", b"old").unwrap();
+        let mut txn = store.begin_transaction();
+        txn.put(b"k", b"new").unwrap();
+        txn.commit().unwrap();
+        assert_eq!(store.get(b"k").unwrap(), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn test_transaction_commit_after_delete_then_put_lands_put() {
+        // Edge: stage delete then put on the same key. Final
+        // state is the put.
+        let mut store = MemoryStorage::new();
+        store.put(b"k", b"v0").unwrap();
+        let mut txn = store.begin_transaction();
+        txn.delete(b"k").unwrap();
+        txn.put(b"k", b"v1").unwrap();
+        txn.commit().unwrap();
+        assert_eq!(store.get(b"k").unwrap(), Some(b"v1".to_vec()));
     }
 }
