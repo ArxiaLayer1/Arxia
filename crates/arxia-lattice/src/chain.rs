@@ -970,10 +970,20 @@ mod tests {
         // `.expect("valid hex hash")`. Source-lint via
         // include_str!. A future regression reintroducing the
         // panic-prone form fails this test before reaching CI.
+        //
+        // PHASE2-001 fix: split on the bare `#[cfg(test)]`
+        // attribute (no whitespace dependence) so the test is
+        // CRLF-tolerant on Windows fresh clones with default
+        // `core.autocrlf=true`. The original literal-LF marker
+        // `"#[cfg(test)]\nmod tests"` did not match a CRLF
+        // file, returning the whole source as one segment and
+        // false-flagging the test scaffolding. The repo also
+        // ships a `.gitattributes` (`*.rs text eol=lf`) as the
+        // root-cause fix ; this CRLF-tolerant split is
+        // defense-in-depth.
         const SELF_SOURCE: &str = include_str!("chain.rs");
-        let test_marker = "#[cfg(test)]\nmod tests";
         let production = SELF_SOURCE
-            .split(test_marker)
+            .split("#[cfg(test)]")
             .next()
             .expect("split always yields >=1 segment");
         assert!(

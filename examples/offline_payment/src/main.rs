@@ -165,12 +165,16 @@ mod tests {
     /// characters are `//` (line comment, doc comment, inner
     /// doc comment). Returns the first offending line if any.
     fn scan_production_for(pattern: &str) -> Option<(usize, String)> {
-        // Use a 2-line marker that only appears at the actual
-        // test-module boundary (not in any docstring mention of
-        // `#[cfg(test)]`).
-        let test_marker = "#[cfg(test)]\nmod tests";
+        // Split on the bare `#[cfg(test)]` attribute. PHASE2-001
+        // fix: the prior 2-line marker `"#[cfg(test)]\nmod tests"`
+        // depended on LF line endings, which broke on Windows
+        // fresh clones with default `core.autocrlf=true` (CRLF
+        // checkout). Using the bare attribute is CRLF-tolerant
+        // (and mention-in-docstring is filtered by the line-comment
+        // skip below). Backed by the workspace `.gitattributes`
+        // rule `*.rs text eol=lf` for the root-cause fix.
         let production_code = SELF_SOURCE
-            .split(test_marker)
+            .split("#[cfg(test)]")
             .next()
             .expect("split always yields >=1 segment");
         for (i, line) in production_code.lines().enumerate() {
@@ -217,14 +221,19 @@ mod tests {
     /// return type) fails this test.
     #[test]
     fn test_main_source_returns_result() {
-        // Use a 2-line marker that only appears at the actual
-        // test-module boundary (not in any docstring mention of
-        // `#[cfg(test)]`).
-        let test_marker = "#[cfg(test)]\nmod tests";
+        // PHASE2-001 fix: same CRLF-tolerant split rationale as
+        // `scan_production_for`. Pre-fix, on Windows fresh-clone
+        // with default `core.autocrlf=true`, the literal-LF
+        // marker did not match, the entire file was returned as
+        // one segment, and the `contains` assertion passed by
+        // accident (because main() IS in the file regardless).
+        // The broken-passing was a methodological gap ; fix
+        // this test alongside the explicitly-failing ones for
+        // semantic consistency.
         let production_code = SELF_SOURCE
-            .split(test_marker)
+            .split("#[cfg(test)]")
             .next()
-            .expect("split always yields ≥1 segment");
+            .expect("split always yields >=1 segment");
         assert!(
             production_code.contains("fn main() -> Result<"),
             "HIGH-023: main() must return Result for `?` propagation"

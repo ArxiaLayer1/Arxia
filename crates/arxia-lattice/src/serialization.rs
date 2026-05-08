@@ -526,15 +526,21 @@ mod tests {
     fn test_from_compact_bytes_no_unguarded_expect_in_module() {
         // MED-003 STRUCTURAL PIN (compile-time / source lint).
         // Read this file at compile time and assert the
-        // production-code section (everything before
-        // `#[cfg(test)]\nmod tests`) does NOT contain
+        // production-code section does NOT contain
         // `.expect("8 bytes")` — the original panic-prone
         // pattern. This catches a future regression that
         // reintroduces the panic-on-slice form.
+        //
+        // PHASE2-001 fix: split on the bare `#[cfg(test)]`
+        // attribute, no whitespace dependence. CRLF-tolerant
+        // (the prior literal `"#[cfg(test)]\nmod tests"` marker
+        // failed on Windows fresh clones with default
+        // `core.autocrlf=true`). Backed by the workspace
+        // `.gitattributes` rule `*.rs text eol=lf` for the
+        // root-cause fix.
         const SELF_SOURCE: &str = include_str!("serialization.rs");
-        let test_marker = "#[cfg(test)]\nmod tests";
         let production = SELF_SOURCE
-            .split(test_marker)
+            .split("#[cfg(test)]")
             .next()
             .expect("split always yields >=1 segment");
         assert!(
