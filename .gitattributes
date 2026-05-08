@@ -1,0 +1,46 @@
+# PHASE2-001 fix: force LF line endings on text files regardless
+# of host OS / git config.
+#
+# Rationale: the workspace contains source-lint tests (in
+# arxia-lattice/src/chain.rs, arxia-lattice/src/serialization.rs,
+# examples/offline_payment/src/main.rs) that use
+# `include_str!(...)` to read their own source at compile time
+# and split on a literal byte sequence. Without this attribute
+# file, Git for Windows applies `core.autocrlf=true` by default,
+# converting LF→CRLF on checkout. The split markers are
+# byte-literal LF; on a CRLF working tree the split fails, the
+# tests fire spuriously, and `cargo test --workspace` exits 101
+# on a fresh Windows clone — breaking the project's reproducible
+# fresh-clone invariant for ~50% of contributing developers.
+#
+# This file is the root-cause fix. The source-lint tests have
+# also been hardened in the same commit to be CRLF-tolerant
+# (they now split on the bare `#[cfg(test)]` attribute), as
+# defense-in-depth.
+#
+# Re-opens / contradicts Phase 1 findings MED-002 (commit 055)
+# and MED-003 (commit 051): their source-lint test idioms were
+# validated only on dev boxes preserving LF.
+
+# Force LF on every Rust source, every TOML config, every
+# Markdown doc, the workspace lockfile, every shell or CI
+# script. These are all text-mode files where LF must be
+# preserved across OSes.
+*.rs        text eol=lf
+*.toml      text eol=lf
+*.md        text eol=lf
+Cargo.lock  text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.sh        text eol=lf
+
+# Windows-native scripts keep CRLF (PowerShell + .cmd convention).
+*.ps1       text eol=crlf
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+
+# Binary files: never normalised.
+*.png       binary
+*.jpg       binary
+*.ico       binary
+*.crate     binary
