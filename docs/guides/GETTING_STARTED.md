@@ -8,10 +8,17 @@
 ## Clone and Build
 
 ```bash
-git clone https://github.com/arxialayer1/arxia.git
-cd arxia
+git clone https://github.com/ArxiaLayer1/Arxia.git
+cd Arxia
 cargo build --workspace
 ```
+
+> The first build of `arxia-proto` emits
+> `warning: arxia-proto@0.1.0: protoc not found, using stub
+> protobuf module (LOW-008: cfg=arxia_proto_stub set)` when the
+> `protoc` binary is not on `PATH`. This is expected on hosts
+> without a Protobuf toolchain ; the workspace falls back to a
+> stub module gated by `cfg=arxia_proto_stub`.
 
 ## Run Tests
 
@@ -21,18 +28,21 @@ cargo test --workspace
 
 ## Run Examples
 
+Each example under `examples/` is its own workspace member binary
+(not a Cargo `[[example]]` target). Invoke with `-p`:
+
 ```bash
 # Offline payment flow
-cargo run --example offline_payment
+cargo run -p offline_payment
 
 # DID issuance
-cargo run --example did_issuance
+cargo run -p did_issuance
 
 # Mesh relay simulation
-cargo run --example mesh_relay
+cargo run -p mesh_relay
 
 # Partition reconciliation
-cargo run --example partition_reconciliation
+cargo run -p partition_reconciliation
 ```
 
 ## Run the Node (Development)
@@ -89,13 +99,14 @@ espflash run --monitor --target esp32
 ## Project Structure
 
 ```
-arxia/
-  crates/          # Library crates
+Arxia/
+  crates/          # Library crates (includes arxia-proto for
+                   #   Protobuf definitions)
   bin/             # Binary targets
   tools/           # CLI tools
-  examples/        # Example programs
+  examples/        # Example programs (each is its own workspace
+                   #   member binary; invoke with `cargo run -p`)
   contracts/       # Smart contract examples
   targets/         # Hardware targets (ESP32)
   docs/            # Documentation
-  proto/           # Protobuf definitions
 ```

@@ -20,12 +20,20 @@ cargo build --workspace
 # Test
 cargo test --workspace
 
-# Run examples
-cargo run --example offline_payment
-cargo run --example did_issuance
-cargo run --example mesh_relay
-cargo run --example partition_reconciliation
+# Run examples (each example is its own workspace member binary,
+# not a Cargo `[[example]]` target — invoke with `-p`).
+cargo run -p offline_payment
+cargo run -p did_issuance
+cargo run -p mesh_relay
+cargo run -p partition_reconciliation
 ```
+
+> The first build of `arxia-proto` emits
+> `warning: arxia-proto@0.1.0: protoc not found, using stub
+> protobuf module (LOW-008: cfg=arxia_proto_stub set)` when the
+> `protoc` binary is not on `PATH`. This is expected on hosts
+> without a Protobuf toolchain ; the workspace falls back to a
+> stub module gated by `cfg=arxia_proto_stub`.
 
 ## Architecture
 
