@@ -39,6 +39,32 @@ multiple-versions = "warn"
 # they bypass MSRV / version-pinning hygiene.
 wildcards = "deny"
 
+# Per-crate accepted residual risks.
+#
+# Some transitive dependencies have known build-script or
+# runtime quirks that we have explicitly reviewed and accepted
+# rather than mitigated. Each entry below is paired with a
+# rationale in `docs/dependency-risks.md` ; an upstream version
+# bump that changes the dependency's behaviour beyond the
+# accepted-risk envelope is forced through the version bound
+# below, so the bump cannot land silently.
+
+# zerocopy 0.8.x: build.rs forks rustc via PATH instead of
+# using cargo's RUSTC env var. Hosts where the toolchain is
+# not on PATH hit a "could not invoke rustc" build failure.
+# Mitigation : README + GETTING_STARTED document the PATH
+# requirement explicitly. See `docs/dependency-risks.md` §
+# "zerocopy build-script PATH dependency" for the full
+# rationale. The deny rules below pin us to the audited
+# 0.8.x line — a 0.9 release forces a deliberate review.
+[[bans.deny]]
+name = "zerocopy"
+version = "<0.8.0"
+
+[[bans.deny]]
+name = "zerocopy"
+version = ">=0.9.0"
+
 [sources]
 # Reject unknown registries and unknown git remotes.
 unknown-registry = "deny"
