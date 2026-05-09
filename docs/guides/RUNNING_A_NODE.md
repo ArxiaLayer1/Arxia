@@ -3,6 +3,17 @@
 > **Status:** Testnet only. Mainnet node operation is not yet available.
 > This guide covers running an Arxia relay node on the development testnet.
 > Hardware deployment instructions are in [HARDWARE_SETUP.md](HARDWARE_SETUP.md).
+>
+> **Binary status:** the `arxia-node` binary at `bin/arxia-node` is
+> currently a stub. The CLI surface documented below
+> (`init`, `start`, `peer connect|list|disconnect`,
+> `sync --from-snapshot`, `relay score|receipts`,
+> `storage stats|prune`) describes the planned interface gated by
+> `docs/SECURITY_INTERFACES.md` (HIGH-027). The stub binary emits
+> a `STUB BINARY` warning at runtime and silently no-ops these
+> subcommands. The node-runtime implementation is on the M6-M12
+> roadmap ; this guide is the contract the implementation will
+> honour.
 
 ---
 
