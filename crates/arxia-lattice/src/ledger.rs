@@ -1,14 +1,74 @@
 //! Global ledger indexing all account chains.
+//!
+//! # Threading
+//!
+//! `Ledger` is single-threaded by design. The two ingest indices
+//! (`send_index`, `consumed_sends`) are maintained inside
+//! `add_block` as a sequential read-then-write pattern (existence
+//! check → destination match → not-consumed check → insert) ; the
+//! sequence is correct under exclusive `&mut self` access but is
+//! NOT safe under concurrent `add_block` calls. Callers that share
+//! a `Ledger` across threads must serialize access externally
+//! (e.g. wrap in `Mutex`).
+//!
+//! # Receive referential integrity
+//!
+//! A `Receive` block carries a `source_hash` that is supposed to point
+//! at the matching `Send` block on the sender's chain. Without an
+//! integrity check at ingest time, a signed `Receive` citing any
+//! 64-hex `source_hash` — including one that points at no real `Send`
+//! anywhere in the lattice — would be accepted by `add_block`,
+//! creating balance out of nothing.
+//!
+//! `add_block` enforces three conditions on every `Receive`, in
+//! order :
+//!
+//! 1. the `source_hash` is the hash of an accepted `Send` block in
+//!    the ledger (`UnknownSourceSend` if not) ;
+//! 2. that `Send`'s `destination` equals the `Receive`'s `account`
+//!    (`WrongDestination` if not) ;
+//! 3. the `source_hash` has not already been consumed by another
+//!    `Receive` anywhere in the lattice (`DuplicateReceive` if it
+//!    has).
+//!
+//! The ledger maintains two indices to keep the check O(1) :
+//! `send_index` maps `Send` block hashes to their `(destination,
+//! amount)` pair ; `consumed_sends` is the set of `source_hash`es
+//! already credited. Inserts to both indices happen only AFTER all
+//! checks (referential + chain-continuity) have passed, so a
+//! rejected block never pollutes them.
 
 use crate::block::{Block, BlockType};
 use crate::validation::verify_block;
 use arxia_core::ArxiaError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// Compact summary of an accepted `Send` block, kept in
+/// [`Ledger::send_index`] for O(1) lookup at `Receive` ingest time.
+#[derive(Debug, Clone)]
+struct SendInfo {
+    destination: String,
+    /// Reserved for the supply-accumulator follow-up (PHASE2-013-B).
+    /// Kept here so the index has the data already at hand when the
+    /// global cap check lands.
+    #[allow(dead_code)]
+    amount: u64,
+}
 
 /// Global ledger index of all account chains.
 pub struct Ledger {
     /// Map from account hex public key to block list.
     pub chains: HashMap<String, Vec<Block>>,
+    /// Index of all accepted `Send` block hashes → destination + amount.
+    /// Maintained incrementally on every accepted `Send` so a `Receive`
+    /// referential check is O(1).
+    send_index: HashMap<String, SendInfo>,
+    /// Set of `source_hash`es already credited by an accepted `Receive`
+    /// somewhere in the lattice. The per-chain `AccountChain.consumed_sources`
+    /// is local to each receiver ; this set is the cross-chain
+    /// counterpart preventing the same `Send` from funding two
+    /// different `Receive`s on different chains.
+    consumed_sends: HashSet<String>,
 }
 
 impl Ledger {
@@ -16,6 +76,8 @@ impl Ledger {
     pub fn new() -> Self {
         Self {
             chains: HashMap::new(),
+            send_index: HashMap::new(),
+            consumed_sends: HashSet::new(),
         }
     }
 
@@ -58,6 +120,26 @@ impl Ledger {
     pub fn add_block(&mut self, block: Block) -> Result<(), ArxiaError> {
         verify_block(&block)?;
 
+        // Receive blocks must reference an accepted Send block whose
+        // destination matches this account and which has not already
+        // been consumed elsewhere in the lattice. See module docstring.
+        if let BlockType::Receive { source_hash } = &block.block_type {
+            let send_info =
+                self.send_index
+                    .get(source_hash)
+                    .ok_or_else(|| ArxiaError::UnknownSourceSend {
+                        source_hash: source_hash.clone(),
+                    })?;
+            if send_info.destination != block.account {
+                return Err(ArxiaError::WrongDestination);
+            }
+            if self.consumed_sends.contains(source_hash) {
+                return Err(ArxiaError::DuplicateReceive {
+                    source_hash: source_hash.clone(),
+                });
+            }
+        }
+
         let chain = self.chains.entry(block.account.clone()).or_default();
 
         // HIGH-003 (commit 031): incremental chain-continuity check.
@@ -95,6 +177,28 @@ impl Ledger {
                     "genesis must have empty previous".into(),
                 ));
             }
+        }
+
+        // Maintain the cross-chain indices. Both inserts happen after
+        // every other check has passed, so a rejected block never
+        // pollutes them.
+        match &block.block_type {
+            BlockType::Send {
+                destination,
+                amount,
+            } => {
+                self.send_index.insert(
+                    block.hash.clone(),
+                    SendInfo {
+                        destination: destination.clone(),
+                        amount: *amount,
+                    },
+                );
+            }
+            BlockType::Receive { source_hash } => {
+                self.consumed_sends.insert(source_hash.clone());
+            }
+            BlockType::Open { .. } | BlockType::Revoke { .. } => {}
         }
 
         chain.push(block);
@@ -451,6 +555,171 @@ mod tests {
         ledger.add_block(send2).expect("send@2 ok");
         ledger.add_block(send3).expect("send@3 ok");
         assert_eq!(ledger.get_chain(alice.id()).unwrap().len(), 3);
+    }
+
+    // ========================================================================
+    // Adversarial tests for the Receive referential-integrity check.
+    //
+    // `Ledger::add_block` must enforce that every accepted `Receive`
+    // block points at a real `Send` whose destination matches the
+    // receiver and which has not already been credited. Without these
+    // checks, a signed `Receive` citing a fabricated source_hash mints
+    // balance from nothing.
+    // ========================================================================
+
+    #[test]
+    fn test_add_block_accepts_legitimate_send_then_receive() {
+        // Happy path : alice opens, alice sends to bob, bob opens,
+        // bob receives. Each block accepted in order. Pin against
+        // any future regression that would over-tighten the new
+        // referential check and reject legitimate flows.
+        let mut ledger = Ledger::new();
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+
+        let alice_open = alice.open(1_000_000, &mut vc).unwrap();
+        let bob_open = bob.open(0, &mut vc).unwrap();
+        let alice_send = alice.send(bob.id(), 100_000, &mut vc).unwrap();
+        let bob_receive = bob.receive(&alice_send, &mut vc).unwrap();
+
+        ledger.add_block(alice_open).expect("alice open");
+        ledger.add_block(bob_open).expect("bob open");
+        ledger.add_block(alice_send).expect("alice send");
+        ledger.add_block(bob_receive).expect("bob receive");
+
+        assert_eq!(ledger.get_chain(alice.id()).unwrap().len(), 2);
+        assert_eq!(ledger.get_chain(bob.id()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_add_block_rejects_phantom_receive_no_matching_send() {
+        // Bob opens his chain, then signs a Receive whose source_hash
+        // is a fabricated 64-hex string corresponding to no real Send
+        // anywhere in the lattice. Pre-fix this was accepted ; post-fix
+        // the ledger rejects with UnknownSourceSend.
+        let mut ledger = Ledger::new();
+        let mut vc = VectorClock::new();
+        let mut bob = AccountChain::new();
+        let bob_open = bob.open(0, &mut vc).unwrap();
+        ledger.add_block(bob_open.clone()).unwrap();
+
+        let phantom_source = "ff".repeat(32);
+        let phantom_receive = forge_block_with_previous(
+            &bob,
+            bob_open.hash.clone(),
+            2,
+            1_000_000, // balance the attacker hopes to mint
+            BlockType::Receive {
+                source_hash: phantom_source.clone(),
+            },
+        );
+
+        let result = ledger.add_block(phantom_receive);
+        assert!(
+            matches!(
+                result,
+                Err(ArxiaError::UnknownSourceSend { ref source_hash })
+                    if source_hash == &phantom_source
+            ),
+            "expected UnknownSourceSend, got {:?}",
+            result
+        );
+        // Bob's chain stays at length 1 (just the open).
+        assert_eq!(ledger.get_chain(bob.id()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_add_block_rejects_receive_with_wrong_destination() {
+        // Alice sends to Bob ; Carol forges a Receive citing the
+        // Send's hash. The Send's destination is Bob, not Carol —
+        // post-fix the ledger rejects with WrongDestination.
+        let mut ledger = Ledger::new();
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let bob = AccountChain::new();
+        let mut carol = AccountChain::new();
+
+        let alice_open = alice.open(1_000_000, &mut vc).unwrap();
+        let carol_open = carol.open(0, &mut vc).unwrap();
+        let alice_send_to_bob = alice.send(bob.id(), 100_000, &mut vc).unwrap();
+        ledger.add_block(alice_open).unwrap();
+        ledger.add_block(carol_open.clone()).unwrap();
+        ledger.add_block(alice_send_to_bob.clone()).unwrap();
+
+        // Carol forges a Receive with Alice's Send hash. The destination
+        // recorded in the Send is Bob's pubkey ; Carol's pubkey doesn't
+        // match.
+        let stolen_receive = forge_block_with_previous(
+            &carol,
+            carol_open.hash.clone(),
+            2,
+            100_000,
+            BlockType::Receive {
+                source_hash: alice_send_to_bob.hash.clone(),
+            },
+        );
+
+        let result = ledger.add_block(stolen_receive);
+        assert!(
+            matches!(result, Err(ArxiaError::WrongDestination)),
+            "expected WrongDestination, got {:?}",
+            result
+        );
+        // Carol's chain stays at length 1 ; the legitimate Send was
+        // already credited and is still in the index awaiting Bob.
+        assert_eq!(ledger.get_chain(carol.id()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_add_block_rejects_double_receive_across_chains() {
+        // Alice sends to Bob, Bob receives (legitimate). A second
+        // chain (Eve, who happens to also have Bob's pubkey would
+        // be impossible, so we forge a Receive on Bob's chain
+        // again — same source_hash, different nonce). Post-fix the
+        // ledger's cross-chain `consumed_sends` set rejects with
+        // DuplicateReceive.
+        let mut ledger = Ledger::new();
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+
+        let alice_open = alice.open(1_000_000, &mut vc).unwrap();
+        let bob_open = bob.open(0, &mut vc).unwrap();
+        let alice_send = alice.send(bob.id(), 100_000, &mut vc).unwrap();
+        let bob_receive = bob.receive(&alice_send, &mut vc).unwrap();
+        ledger.add_block(alice_open).unwrap();
+        ledger.add_block(bob_open).unwrap();
+        ledger.add_block(alice_send.clone()).unwrap();
+        ledger.add_block(bob_receive.clone()).unwrap();
+
+        // Forge a SECOND Receive on Bob's chain with the same
+        // source_hash but a fabricated nonce / previous to bypass
+        // chain continuity. (The cross-chain consumed_sends check
+        // fires before chain continuity, so we use forge to give
+        // it a syntactically valid block.)
+        let double_receive = forge_block_with_previous(
+            &bob,
+            bob_receive.hash.clone(),
+            3,
+            bob.balance + 100_000,
+            BlockType::Receive {
+                source_hash: alice_send.hash.clone(),
+            },
+        );
+
+        let result = ledger.add_block(double_receive);
+        assert!(
+            matches!(
+                result,
+                Err(ArxiaError::DuplicateReceive { ref source_hash })
+                    if source_hash == &alice_send.hash
+            ),
+            "expected DuplicateReceive, got {:?}",
+            result
+        );
+        // Bob's chain stays at length 2.
+        assert_eq!(ledger.get_chain(bob.id()).unwrap().len(), 2);
     }
 
     #[test]

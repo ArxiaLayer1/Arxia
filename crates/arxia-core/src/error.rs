@@ -192,4 +192,15 @@ pub enum ArxiaError {
         /// Debug-formatted block type tag (e.g. `"Revoke"`).
         block_type: String,
     },
+
+    /// A `Receive` block references a `source_hash` that does not
+    /// correspond to any accepted `Send` block in the ledger.
+    /// Phantom-receive defense: prevents a forged `Receive` citing
+    /// a fabricated 64-hex `source_hash` from minting balance out
+    /// of nothing.
+    #[error("receive references unknown source send: {source_hash}")]
+    UnknownSourceSend {
+        /// Hex-encoded `source_hash` from the `Receive` block.
+        source_hash: String,
+    },
 }
