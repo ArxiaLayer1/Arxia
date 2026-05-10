@@ -102,8 +102,11 @@ impl Default for VectorClock {
 /// Manages a single account chain of blocks.
 pub struct AccountChain {
     signing_key: SigningKey,
-    /// The Ed25519 verifying key.
-    pub verifying_key: ed25519_dalek::VerifyingKey,
+    /// The Ed25519 verifying key. `pub(crate)` so external code
+    /// cannot mutate it after construction; an external mutation
+    /// would bypass the keypair invariant maintained by
+    /// `AccountChain::new`. Read access via [`AccountChain::verifying_key`].
+    pub(crate) verifying_key: ed25519_dalek::VerifyingKey,
     /// Hex-encoded public key.
     pub public_key_hex: String,
     /// The chain of blocks.
@@ -137,6 +140,13 @@ impl AccountChain {
     /// Full hex-encoded public key.
     pub fn id(&self) -> &str {
         &self.public_key_hex
+    }
+
+    /// Read access to the Ed25519 verifying key. The field itself
+    /// is `pub(crate)` to prevent external mutation (which would
+    /// bypass the keypair invariant established by [`Self::new`]).
+    pub fn verifying_key(&self) -> &ed25519_dalek::VerifyingKey {
+        &self.verifying_key
     }
 
     /// Short identifier (first 8 hex chars of the public-key hex
