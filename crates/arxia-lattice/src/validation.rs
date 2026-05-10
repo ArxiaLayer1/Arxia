@@ -159,6 +159,26 @@ mod tests {
             "production verify_block must not bypass arxia_crypto via \
              VerifyingKey::verify either"
         );
+        // Trait-method form bypass guard: a code-toucher could
+        // import `Verifier` and call `Verifier::verify(&vk, ...)`
+        // or `<VerifyingKey as Verifier>::verify(&vk, ...)`. The
+        // earlier two checks would not match this form, so they
+        // are extended here.
+        assert!(
+            !production.contains("Verifier::verify("),
+            "production verify_block must not call Verifier::verify directly"
+        );
+        assert!(
+            !production.contains("as Verifier>::verify"),
+            "production verify_block must not call <VerifyingKey as Verifier>::verify"
+        );
+        // Aliased import bypass guard: forbid bringing dalek's
+        // `Verifier` trait into scope at all in production.
+        assert!(
+            !production.contains("ed25519_dalek::Verifier"),
+            "production verify_block must not import ed25519_dalek::Verifier; \
+             route through arxia_crypto::verify instead"
+        );
         assert!(
             production.contains("arxia_crypto::verify"),
             "production verify_block must route through arxia_crypto::verify"

@@ -364,24 +364,23 @@ mod tests {
     #[test]
     fn test_validate_pubkey_strict_rejects_second_known_low_order_pubkey() {
         // A second small-subgroup point from RFC 7748 / Curve25519
-        // small-subgroup attack literature: a point of order 8.
-        // dalek's `is_weak()` catches the order-2 / order-4 / order-8
-        // cases via its small-order check.
+        // small-subgroup attack literature. Either `from_bytes`
+        // refuses to decompress (returns "not a valid Ed25519 point")
+        // or decompression succeeds and `is_weak` rejects it
+        // (returns "low-order Ed25519 public key (weak)"). Both
+        // surface as `Err(ArxiaError::InvalidKey)`.
         let low_order_pk: [u8; 32] = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x80,
         ];
-        // Some encodings here may be accepted by from_bytes but
-        // rejected by is_weak. Either way validate_pubkey_strict
-        // returns InvalidKey.
-        let _ = validate_pubkey_strict(&low_order_pk);
-        // We don't assert Err unconditionally because the exact
-        // small-subgroup byte pattern is implementation-dependent;
-        // the order-4 point in `test_validate_pubkey_strict_rejects_known_low_order_pubkey`
-        // is the canonical pin. This test exists as a regression
-        // probe — if `validate_pubkey_strict` ever PANICS on this
-        // input, that's the regression.
+        let result = validate_pubkey_strict(&low_order_pk);
+        let err = result.expect_err("validate_pubkey_strict must reject this byte pattern");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("low-order") || msg.contains("weak") || msg.contains("not a valid"),
+            "expected low-order / weak / not-on-curve diagnostic, got {msg:?}"
+        );
     }
 
     // ============================================================
