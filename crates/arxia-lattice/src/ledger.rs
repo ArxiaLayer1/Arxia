@@ -1,5 +1,27 @@
 //! Global ledger indexing all account chains.
 //!
+//! # Global supply ceiling
+//!
+//! `Ledger` maintains `total_supply: u64`, the running sum of
+//! `initial_balance` across every accepted `Open` block. `add_block`
+//! refuses any `Open` whose `initial_balance` would push this sum
+//! above [`arxia_core::TOTAL_SUPPLY_MICRO_ARX`]. The check fires
+//! BEFORE chain-state mutation, so a rejected Open leaves
+//! `total_supply` untouched.
+//!
+//! Send and Receive do not change the total supply (they are
+//! conservation-preserving — Alice balance −amount, Bob balance
+//! +amount nets to 0). Only Open mints. There is no current burn
+//! path ; if one is added later it should decrement the
+//! accumulator at the same boundary.
+//!
+//! Combined with the per-account ceiling
+//! [`arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT`] enforced at
+//! `AccountChain::open` and `AccountChain::receive`, the two caps
+//! form a layered guard : the global cap bounds total supply
+//! across all accounts, the per-account cap bounds concentration
+//! within any single account.
+//!
 //! # Threading
 //!
 //! `Ledger` is single-threaded by design. The two ingest indices
@@ -69,6 +91,12 @@ pub struct Ledger {
     /// counterpart preventing the same `Send` from funding two
     /// different `Receive`s on different chains.
     consumed_sends: HashSet<String>,
+    /// Running sum of `initial_balance` across every accepted
+    /// `Open` block. Compared against
+    /// [`arxia_core::TOTAL_SUPPLY_MICRO_ARX`] before each new Open
+    /// is accepted, so the ledger refuses to mint past the
+    /// protocol-wide ceiling. See module docstring.
+    total_supply: u64,
 }
 
 impl Ledger {
@@ -78,7 +106,14 @@ impl Ledger {
             chains: HashMap::new(),
             send_index: HashMap::new(),
             consumed_sends: HashSet::new(),
+            total_supply: 0,
         }
+    }
+
+    /// Read-only access to the running total supply (sum of every
+    /// accepted Open's `initial_balance`).
+    pub fn total_supply(&self) -> u64 {
+        self.total_supply
     }
 
     /// Add a block to the ledger, after verifying its Ed25519 signature
@@ -119,6 +154,25 @@ impl Ledger {
     ///   is not a valid OPEN with `previous == ""`.
     pub fn add_block(&mut self, block: Block) -> Result<(), ArxiaError> {
         verify_block(&block)?;
+
+        // Open blocks must not push the cumulative supply past the
+        // protocol-wide ceiling. See module docstring (Global supply
+        // ceiling). Checked here, before any chain mutation, so a
+        // rejected Open leaves `total_supply` untouched.
+        if let BlockType::Open { initial_balance } = &block.block_type {
+            let projected = self.total_supply.checked_add(*initial_balance).ok_or(
+                ArxiaError::SupplyCapExceeded {
+                    requested: u64::MAX,
+                    max: arxia_core::TOTAL_SUPPLY_MICRO_ARX,
+                },
+            )?;
+            if projected > arxia_core::TOTAL_SUPPLY_MICRO_ARX {
+                return Err(ArxiaError::SupplyCapExceeded {
+                    requested: projected,
+                    max: arxia_core::TOTAL_SUPPLY_MICRO_ARX,
+                });
+            }
+        }
 
         // Receive blocks must reference an accepted Send block whose
         // destination matches this account and which has not already
@@ -198,7 +252,17 @@ impl Ledger {
             BlockType::Receive { source_hash } => {
                 self.consumed_sends.insert(source_hash.clone());
             }
-            BlockType::Open { .. } | BlockType::Revoke { .. } => {}
+            BlockType::Open { initial_balance } => {
+                // The cap check at the top of this function already
+                // proved this addition cannot overflow nor exceed
+                // TOTAL_SUPPLY_MICRO_ARX. `checked_add` here is
+                // belt-and-braces.
+                self.total_supply = self
+                    .total_supply
+                    .checked_add(*initial_balance)
+                    .expect("total_supply addition pre-validated by cap check above");
+            }
+            BlockType::Revoke { .. } => {}
         }
 
         chain.push(block);
@@ -720,6 +784,106 @@ mod tests {
         );
         // Bob's chain stays at length 2.
         assert_eq!(ledger.get_chain(bob.id()).unwrap().len(), 2);
+    }
+
+    // ========================================================================
+    // Adversarial tests for the global supply accumulator.
+    //
+    // `Ledger::add_block` must refuse any `Open` whose `initial_balance`
+    // would push the cumulative supply above
+    // `arxia_core::TOTAL_SUPPLY_MICRO_ARX`. Send and Receive must NOT
+    // affect the running total (they are conservation-preserving).
+    // ========================================================================
+
+    #[test]
+    fn test_add_block_open_increments_total_supply() {
+        // Each accepted Open adds its initial_balance to the running
+        // total. Pin the accumulator's incremental behaviour.
+        let mut ledger = Ledger::new();
+        assert_eq!(ledger.total_supply(), 0);
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        let alice_open = alice.open(1_000_000, &mut vc).unwrap();
+        let bob_open = bob.open(2_500_000, &mut vc).unwrap();
+        ledger.add_block(alice_open).unwrap();
+        assert_eq!(ledger.total_supply(), 1_000_000);
+        ledger.add_block(bob_open).unwrap();
+        assert_eq!(ledger.total_supply(), 3_500_000);
+    }
+
+    #[test]
+    fn test_add_block_send_and_receive_leave_total_supply_unchanged() {
+        // Send and Receive are conservation-preserving (Alice
+        // -amount, Bob +amount nets to zero). Only Open mints.
+        let mut ledger = Ledger::new();
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        let alice_open = alice.open(1_000_000, &mut vc).unwrap();
+        let bob_open = bob.open(0, &mut vc).unwrap();
+        let send = alice.send(bob.id(), 100_000, &mut vc).unwrap();
+        let recv = bob.receive(&send, &mut vc).unwrap();
+        ledger.add_block(alice_open).unwrap();
+        ledger.add_block(bob_open).unwrap();
+        let supply_before = ledger.total_supply();
+        ledger.add_block(send).unwrap();
+        ledger.add_block(recv).unwrap();
+        assert_eq!(
+            ledger.total_supply(),
+            supply_before,
+            "send + receive must not change total supply"
+        );
+    }
+
+    #[test]
+    fn test_add_block_accepts_open_at_exact_supply_ceiling() {
+        // Boundary : the very last Open whose initial_balance brings
+        // the running total to exactly TOTAL_SUPPLY_MICRO_ARX must
+        // be accepted (=, not <).
+        let mut ledger = Ledger::new();
+        let mut vc = VectorClock::new();
+        // Open 10 chains at the per-account cap ; 10 × cap = total
+        // supply exactly.
+        for _ in 0..10 {
+            let mut acct = AccountChain::new();
+            let open = acct
+                .open(arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT, &mut vc)
+                .unwrap();
+            ledger.add_block(open).expect("each open at cap is fine");
+        }
+        assert_eq!(ledger.total_supply(), arxia_core::TOTAL_SUPPLY_MICRO_ARX);
+    }
+
+    #[test]
+    fn test_add_block_rejects_open_that_would_exceed_supply_ceiling() {
+        // Open the protocol to its full capacity, then attempt one
+        // more Open. The eleventh Open must be rejected with
+        // SupplyCapExceeded against the global ceiling.
+        let mut ledger = Ledger::new();
+        let mut vc = VectorClock::new();
+        for _ in 0..10 {
+            let mut acct = AccountChain::new();
+            let open = acct
+                .open(arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT, &mut vc)
+                .unwrap();
+            ledger.add_block(open).unwrap();
+        }
+        let mut overflow_acct = AccountChain::new();
+        let overflow_open = overflow_acct.open(1, &mut vc).unwrap();
+        let result = ledger.add_block(overflow_open);
+        assert!(
+            matches!(
+                result,
+                Err(ArxiaError::SupplyCapExceeded { requested, max })
+                    if requested == arxia_core::TOTAL_SUPPLY_MICRO_ARX + 1
+                        && max == arxia_core::TOTAL_SUPPLY_MICRO_ARX
+            ),
+            "expected SupplyCapExceeded against TOTAL_SUPPLY ceiling, got {:?}",
+            result
+        );
+        // Total supply is unchanged after the rejected Open.
+        assert_eq!(ledger.total_supply(), arxia_core::TOTAL_SUPPLY_MICRO_ARX);
     }
 
     #[test]
