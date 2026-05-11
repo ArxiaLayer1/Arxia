@@ -365,6 +365,19 @@ impl AccountChain {
                 current: self.balance,
                 incoming: amount,
             })?;
+        // Per-account ceiling propagated from `open` to `receive`.
+        // A chain that opens at the cap can otherwise grow without
+        // bound through successive receives. Defense-in-depth on
+        // the global supply ceiling enforced by `Ledger::add_block` :
+        // even if the global cap is correctly enforced, this
+        // per-account check bounds concentration within a single
+        // account.
+        if new_balance > arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT {
+            return Err(ArxiaError::SupplyCapExceeded {
+                requested: new_balance,
+                max: arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT,
+            });
+        }
         let sid = self.public_key_hex[..8].to_string();
         vclock.tick(&sid);
         self.balance = new_balance;
@@ -808,19 +821,49 @@ mod tests {
     }
 
     #[test]
-    fn test_receive_at_exact_u64_max_is_accepted() {
-        // Boundary: if current + amount == u64::MAX the result still
-        // fits, so receive MUST succeed and balance MUST be exactly
-        // u64::MAX.
+    fn test_receive_at_exact_per_account_cap_is_accepted() {
+        // Boundary: if (current + amount) == MAX_INITIAL_BALANCE_PER_ACCOUNT
+        // the result is at the cap (not over it), so receive MUST
+        // succeed and balance MUST be exactly the cap.
         let mut vc = VectorClock::new();
         let mut alice = AccountChain::new();
         let mut bob = AccountChain::new();
-        alice.open(1_000_000, &mut vc).unwrap();
+        alice
+            .open(arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT, &mut vc)
+            .unwrap();
         bob.open(0, &mut vc).unwrap();
-        bob.balance = u64::MAX - 100;
+        bob.balance = arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT - 100;
         let send = alice.send(bob.id(), 100, &mut vc).unwrap();
         bob.receive(&send, &mut vc).expect("exact-fit receive");
-        assert_eq!(bob.balance, u64::MAX);
+        assert_eq!(bob.balance, arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT);
+    }
+
+    #[test]
+    fn test_receive_one_above_per_account_cap_is_rejected() {
+        // Receive that would push the balance one micro-ARX over
+        // MAX_INITIAL_BALANCE_PER_ACCOUNT must reject with
+        // SupplyCapExceeded. Pin against any future regression that
+        // would loosen the cap propagation.
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice
+            .open(arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT, &mut vc)
+            .unwrap();
+        bob.open(0, &mut vc).unwrap();
+        bob.balance = arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT - 100;
+        let send = alice.send(bob.id(), 101, &mut vc).unwrap();
+        let result = bob.receive(&send, &mut vc);
+        assert!(
+            matches!(
+                result,
+                Err(ArxiaError::SupplyCapExceeded { requested, max })
+                    if requested == arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT + 1
+                        && max == arxia_core::MAX_INITIAL_BALANCE_PER_ACCOUNT
+            ),
+            "expected SupplyCapExceeded at cap+1, got {:?}",
+            result
+        );
     }
 
     #[test]
