@@ -1,7 +1,8 @@
 //! AccountChain manages a single account block chain and keypair.
 
+use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
+use rand::rngs::SysRng;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::block::{Block, BlockType};
@@ -123,7 +124,7 @@ pub struct AccountChain {
 impl AccountChain {
     /// Create a new account with a fresh Ed25519 keypair.
     pub fn new() -> Self {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::generate(&mut UnwrapErr(SysRng));
         let verifying_key = signing_key.verifying_key();
         let public_key_hex = hex::encode(verifying_key.as_bytes());
         Self {

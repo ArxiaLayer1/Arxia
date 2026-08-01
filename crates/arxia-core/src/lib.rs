@@ -158,7 +158,7 @@ mod cfg_pin_tests {
         // (or higher minor). A regression that drops the
         // minor breaks this test.
         for (dep_name, must_contain) in &[
-            ("ed25519-dalek", "version = \"2.2"),
+            ("ed25519-dalek", "version = \"3.0"),
             ("blake3", "blake3 = \"1.8"),
             ("serde", "version = \"1.0"),
             ("serde_json", "serde_json = \"1.0"),

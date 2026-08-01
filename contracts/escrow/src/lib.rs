@@ -199,11 +199,12 @@ impl Escrow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::rand_core::UnwrapErr;
     use ed25519_dalek::{Signer, SigningKey};
-    use rand::rngs::OsRng;
+    use rand::rngs::SysRng;
 
     fn mk_keypair() -> (SigningKey, [u8; 32], String) {
-        let sk = SigningKey::generate(&mut OsRng);
+        let sk = SigningKey::generate(&mut UnwrapErr(SysRng));
         let pk_bytes = sk.verifying_key().to_bytes();
         let pk_hex = hex::encode(pk_bytes);
         (sk, pk_bytes, pk_hex)

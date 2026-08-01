@@ -47,14 +47,15 @@
 //! DID, but the DID itself would be a stable identifier whose
 //! "owner" is undefined. HIGH-018 closes the parse-time half.
 
+use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
+use rand::rngs::SysRng;
 
 use arxia_core::{AccountId, ArxiaError, SignatureBytes};
 
 /// Generate a new Ed25519 keypair.
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let signing_key = SigningKey::generate(&mut UnwrapErr(SysRng));
     let verifying_key = signing_key.verifying_key();
     (signing_key, verifying_key)
 }
