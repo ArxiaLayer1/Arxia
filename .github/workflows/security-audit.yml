@@ -25,11 +25,25 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v6
+      # cargo-audit reads Cargo.lock and matches it against the RustSec
+      # advisory database — it never compiles the workspace, so the
+      # project's MSRV is irrelevant to it. Pinning this job to the MSRV
+      # made the toolchain the binding constraint on the *tool*: when
+      # cargo-audit raised its own MSRV to 1.88, `cargo install` resolved
+      # to a release the 1.85 toolchain could not build and the job broke
+      # on every PR and on main. MSRV is still enforced where it matters,
+      # by the 1.85.0 build/test/clippy jobs in ci.yml.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85.0"
       - uses: Swatinem/rust-cache@v2
+      # `rust-toolchain.toml` pins the repo to the MSRV, and rustup
+      # honours it for every cargo invocation made inside the checkout —
+      # which includes this `cargo install`. RUSTUP_TOOLCHAIN overrides
+      # that file so the tool is *built* with stable. Only the build
+      # needs it: the resulting cargo-audit binary is native and runs
+      # independently of whatever toolchain is active afterwards.
       - name: Install cargo-audit
+        env:
+          RUSTUP_TOOLCHAIN: stable
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
         run: cargo audit --deny warnings
