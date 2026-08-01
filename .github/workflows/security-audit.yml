@@ -24,7 +24,7 @@ jobs:
       checks: write
       issues: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # cargo-audit reads Cargo.lock and matches it against the RustSec
       # advisory database — it never compiles the workspace, so the
       # project's MSRV is irrelevant to it. Pinning this job to the MSRV
