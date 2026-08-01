@@ -35,7 +35,15 @@ jobs:
       # by the 1.85.0 build/test/clippy jobs in ci.yml.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `rust-toolchain.toml` pins the repo to the MSRV, and rustup
+      # honours it for every cargo invocation made inside the checkout —
+      # which includes this `cargo install`. RUSTUP_TOOLCHAIN overrides
+      # that file so the tool is *built* with stable. Only the build
+      # needs it: the resulting cargo-audit binary is native and runs
+      # independently of whatever toolchain is active afterwards.
       - name: Install cargo-audit
+        env:
+          RUSTUP_TOOLCHAIN: stable
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
         run: cargo audit --deny warnings
