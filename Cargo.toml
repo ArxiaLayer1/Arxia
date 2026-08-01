@@ -45,7 +45,7 @@ description = "Layer 1 blockchain for offline-first mesh consensus"
 # silent bump. Path-only crates (the workspace members below)
 # don't need version pins.
 [workspace.dependencies]
-ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+ed25519-dalek = { version = "3.0", features = ["rand_core"] }
 blake3 = "1.8"
 chacha20poly1305 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
@@ -58,7 +58,7 @@ tokio = { version = "1.44", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 criterion = { version = "0.7", features = ["html_reports"] }
-rand = "0.8.6"
+rand = "0.10.2"
 thiserror = "2.0"
 bs58 = "0.5"
 
