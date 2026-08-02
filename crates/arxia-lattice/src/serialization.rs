@@ -531,8 +531,8 @@ mod tests {
         // pattern. This catches a future regression that
         // reintroduces the panic-on-slice form.
         //
-        // PHASE2-001 fix: split on the bare `#[cfg(test)]`
-        // attribute, no whitespace dependence. CRLF-tolerant
+        // The split is on the bare `#[cfg(test)]` attribute,
+        // no whitespace dependence. CRLF-tolerant
         // (the prior literal `"#[cfg(test)]\nmod tests"` marker
         // failed on Windows fresh clones with default
         // `core.autocrlf=true`). Backed by the workspace

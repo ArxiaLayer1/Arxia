@@ -78,10 +78,11 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone)]
 struct SendInfo {
     destination: String,
-    /// Reserved for the supply-accumulator follow-up (PHASE2-013-B).
-    /// Kept here so the index has the data already at hand when the
-    /// global cap check lands.
-    #[allow(dead_code)]
+    /// Amount of the `Send`, as recorded at its own ingestion. This is
+    /// the source of authority for the credit of the `Receive` that
+    /// later cites this block: the conservation check derives the
+    /// expected post-balance from it, never from what the `Receive`
+    /// declares about itself.
     amount: u64,
 }
 
