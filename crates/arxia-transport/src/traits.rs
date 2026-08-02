@@ -1,6 +1,6 @@
 //! Transport trait definition.
 
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, TransportFault};
 use core::time::Duration;
 
 use ed25519_dalek::SigningKey;
@@ -231,8 +231,6 @@ pub enum TransportError {
         /// Accepted deviation either side, in milliseconds.
         max_skew: u64,
     },
-    /// Generic transport error.
-    Other(String),
 }
 
 impl std::fmt::Display for TransportError {
@@ -258,7 +256,6 @@ impl std::fmt::Display for TransportError {
                     "transport message signature does not verify under `from`"
                 )
             }
-            Self::Other(msg) => write!(f, "transport error: {}", msg),
             Self::TimestampStale {
                 timestamp,
                 now,
@@ -275,7 +272,29 @@ impl std::error::Error for TransportError {}
 
 impl From<TransportError> for ArxiaError {
     fn from(e: TransportError) -> Self {
-        ArxiaError::Transport(e.to_string())
+        // Exhaustive on purpose: a new TransportError variant fails to
+        // compile here until it is mapped, so the mirror in arxia-core
+        // cannot silently fall behind.
+        let fault = match e {
+            TransportError::PayloadTooLarge { size, max } => {
+                TransportFault::PayloadTooLarge { size, max }
+            }
+            TransportError::Disconnected => TransportFault::Disconnected,
+            TransportError::MessageLost => TransportFault::MessageLost,
+            TransportError::BackPressure { capacity } => TransportFault::BackPressure { capacity },
+            TransportError::InvalidFromField => TransportFault::InvalidFromField,
+            TransportError::SignatureInvalid => TransportFault::SignatureInvalid,
+            TransportError::TimestampStale {
+                timestamp,
+                now,
+                max_skew,
+            } => TransportFault::TimestampStale {
+                timestamp,
+                now,
+                max_skew,
+            },
+        };
+        ArxiaError::Transport { fault }
     }
 }
 
@@ -437,5 +456,59 @@ mod tests {
         let (sk, _) = generate_keypair();
         let m = SignedTransportMessage::sign(&sk, String::new(), Vec::new(), 0);
         assert!(m.verify().is_ok());
+    }
+
+    /// R3 of the typed-error rework: the crate-boundary conversion
+    /// must keep different transport faults distinguishable, payloads
+    /// included. Peer scoring routes on exactly these discriminants
+    /// (a stale timestamp is a replay signal; a bad signature is an
+    /// impersonation signal; they must never blur). A conversion that
+    /// collapses two faults into one arm fails these asserts.
+    #[test]
+    fn conversion_keeps_transport_faults_distinguishable() {
+        let too_large: ArxiaError = TransportError::PayloadTooLarge {
+            size: 300,
+            max: 256,
+        }
+        .into();
+        assert!(matches!(
+            too_large,
+            ArxiaError::Transport {
+                fault: TransportFault::PayloadTooLarge {
+                    size: 300,
+                    max: 256
+                }
+            }
+        ));
+
+        let stale: ArxiaError = TransportError::TimestampStale {
+            timestamp: 1_000,
+            now: 999_999,
+            max_skew: 60_000,
+        }
+        .into();
+        assert!(matches!(
+            stale,
+            ArxiaError::Transport {
+                fault: TransportFault::TimestampStale {
+                    timestamp: 1_000,
+                    now: 999_999,
+                    max_skew: 60_000,
+                }
+            }
+        ));
+
+        let spoof: ArxiaError = TransportError::SignatureInvalid.into();
+        assert!(matches!(
+            spoof,
+            ArxiaError::Transport {
+                fault: TransportFault::SignatureInvalid
+            }
+        ));
+
+        // R2: the wrapped Display still reads like a sentence with the
+        // payload in it, for the operator staring at a log.
+        assert!(too_large.to_string().contains("300 > 256"));
+        assert!(stale.to_string().contains("max skew 60000"));
     }
 }

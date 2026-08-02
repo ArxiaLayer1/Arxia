@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, SerializedItem};
 
 /// The type of operation a block represents.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -110,8 +110,9 @@ impl Block {
             .try_into()
             .map_err(|_| ArxiaError::InvalidKey("bad key length".into()))?;
         arxia_crypto::validate_pubkey_strict(&pubkey_bytes)?;
-        let bt_json = serde_json::to_string(block_type)
-            .map_err(|e| ArxiaError::Serialization(format!("BlockType: {e}")))?;
+        let bt_json = serde_json::to_string(block_type).map_err(|_| ArxiaError::Serialization {
+            item: SerializedItem::BlockType,
+        })?;
         let content = format!(
             "{}:{}:{}:{}:{}:{}",
             account, previous, bt_json, balance, nonce, timestamp

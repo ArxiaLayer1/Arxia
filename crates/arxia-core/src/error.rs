@@ -80,9 +80,14 @@ pub enum ArxiaError {
         nonce: u64,
     },
 
-    /// Transport-level error.
-    #[error("transport error: {0}")]
-    Transport(String),
+    /// Transport-level fault, with the transport crate's own typed
+    /// error mirrored across the crate boundary so its payloads
+    /// survive the conversion instead of being flattened to prose.
+    #[error("transport error: {fault}")]
+    Transport {
+        /// The specific transport fault.
+        fault: TransportFault,
+    },
 
     /// Sync timed out.
     #[error("sync timeout")]
@@ -96,9 +101,12 @@ pub enum ArxiaError {
     #[error("hex decode error: {0}")]
     HexDecode(#[from] hex::FromHexError),
 
-    /// Serialization error.
-    #[error("serialization error: {0}")]
-    Serialization(String),
+    /// A protocol item failed to serialize.
+    #[error("serialization failed for {item}")]
+    Serialization {
+        /// Which item was being serialized.
+        item: SerializedItem,
+    },
 
     /// Invalid cryptographic key.
     #[error("invalid key: {0}")]
@@ -271,6 +279,64 @@ pub enum GenesisRule {
     PreviousMustBeEmpty,
 }
 
+/// The specific fault behind an [`ArxiaError::Transport`].
+///
+/// Mirrors the transport crate's own error type field-for-field; the
+/// `From` conversion over there is an exhaustive match, so adding a
+/// transport error variant without mapping it here is a compile
+/// error, not a silent flattening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TransportFault {
+    /// Message exceeds the MTU for this transport.
+    #[error("payload too large: {size} > {max}")]
+    PayloadTooLarge {
+        /// Size of the payload.
+        size: usize,
+        /// Maximum allowed size.
+        max: usize,
+    },
+    /// The transport channel is disconnected.
+    #[error("transport disconnected")]
+    Disconnected,
+    /// The message was lost in transit.
+    #[error("message lost")]
+    MessageLost,
+    /// The send-side outbox is at capacity; the caller must drain
+    /// before retrying.
+    #[error("transport outbox full (capacity {capacity})")]
+    BackPressure {
+        /// Configured outbox capacity, in messages.
+        capacity: usize,
+    },
+    /// The message's `from` field is not a 64-char hex pubkey.
+    #[error("transport message `from` is not a 64-char hex 32-byte pubkey")]
+    InvalidFromField,
+    /// The message signature does not verify under `from`.
+    #[error("transport message signature does not verify under `from`")]
+    SignatureInvalid,
+    /// The message timestamp falls outside the freshness window.
+    #[error(
+        "message timestamp {timestamp} outside freshness window (now {now}, max skew {max_skew} ms)"
+    )]
+    TimestampStale {
+        /// Message timestamp, ms since epoch.
+        timestamp: u64,
+        /// Verifier clock, ms since epoch.
+        now: u64,
+        /// Accepted deviation either side, ms.
+        max_skew: u64,
+    },
+}
+
+/// Which protocol item an [`ArxiaError::Serialization`] was
+/// serializing when it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SerializedItem {
+    /// The `BlockType` payload of a block being hashed.
+    #[error("block type")]
+    BlockType,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +344,20 @@ mod tests {
     /// R2 of the typed-error rework: `Display` must stay operator-
     /// readable. Each rule renders a sentence carrying its payload,
     /// not a bare variant name.
+    /// R2 for the transport and serialization families.
+    #[test]
+    fn transport_and_serialization_display_are_operator_readable() {
+        let f = TransportFault::BackPressure { capacity: 128 };
+        assert_eq!(f.to_string(), "transport outbox full (capacity 128)");
+        let wrapped = ArxiaError::Transport { fault: f };
+        assert!(wrapped.to_string().starts_with("transport error:"));
+
+        let s = ArxiaError::Serialization {
+            item: SerializedItem::BlockType,
+        };
+        assert_eq!(s.to_string(), "serialization failed for block type");
+    }
+
     #[test]
     fn genesis_rule_display_is_operator_readable() {
         let nonce = GenesisRule::NonceMustBeOne { got: 7 };
