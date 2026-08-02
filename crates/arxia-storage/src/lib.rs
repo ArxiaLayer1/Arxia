@@ -85,10 +85,41 @@
 //! have requirements no single engine satisfies.
 
 use arxia_core::ArxiaError;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+/// A single operation inside an [`StorageBackend::apply_batch`] call.
+///
+/// Borrowed rather than owned so a caller can assemble a batch from
+/// existing buffers without copying — the embedded backend has no
+/// allocator to spare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchOp<'a> {
+    /// Write `value` at `key`, replacing any existing value.
+    Put {
+        /// Key to write.
+        key: &'a [u8],
+        /// Value to store.
+        value: &'a [u8],
+    },
+    /// Remove `key`. Removing an absent key is not an error.
+    Delete {
+        /// Key to remove.
+        key: &'a [u8],
+    },
+}
+
 /// Trait for key-value storage backends.
+///
+/// No crate consumes this trait yet: the ledger is still entirely
+/// in-memory. What follows is the contract the forthcoming persistent
+/// backends must meet, written before they exist so that they can be
+/// held to it rather than defining it by accident.
+///
+/// Keys are ordered lexicographically by byte value. Implementations
+/// MUST preserve that ordering — [`Self::scan_prefix`] is meaningless
+/// otherwise, and reading an account chain in nonce order will rely on
+/// it once chains are keyed by a big-endian nonce suffix.
 pub trait StorageBackend {
     /// Store a value under the given key.
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError>;
@@ -101,18 +132,76 @@ pub trait StorageBackend {
     fn delete(&mut self, key: &[u8]) -> Result<bool, ArxiaError>;
     /// Check if a key exists.
     fn contains(&self, key: &[u8]) -> Result<bool, ArxiaError>;
+
+    /// Visit every entry whose key starts with `prefix`, in ascending
+    /// key order.
+    ///
+    /// `visit` returns `true` to continue and `false` to stop early;
+    /// stopping early is not an error. The callback borrows the key and
+    /// value for the duration of the call only, so an implementation is
+    /// free to reuse a scratch buffer between entries and never has to
+    /// materialise the whole range.
+    ///
+    /// An empty `prefix` visits every entry.
+    ///
+    /// # Why this exists
+    ///
+    /// A persisted account chain is one block per key under a shared
+    /// per-account prefix. Reading such a chain back, or verifying its
+    /// integrity, means walking those keys in order; point lookups
+    /// cannot express a range whose length is not known in advance.
+    fn scan_prefix(
+        &self,
+        prefix: &[u8],
+        visit: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<(), ArxiaError>;
+
+    /// Apply every operation in `ops`, or none of them.
+    ///
+    /// # Atomicity contract
+    ///
+    /// This is the load-bearing guarantee of the whole trait, and an
+    /// implementation that cannot honour it must return an error rather
+    /// than apply the batch partially.
+    ///
+    /// - On `Ok(())`, every operation is applied and durable to the
+    ///   degree the backend promises.
+    /// - On `Err(_)`, the store is byte-for-byte what it was before the
+    ///   call. No operation is observable, not even the first.
+    /// - No intermediate state is ever observable by a concurrent
+    ///   reader: readers see either the whole batch or none of it.
+    ///
+    /// Later operations override earlier ones on the same key.
+    ///
+    /// # Why the ledger will need it
+    ///
+    /// `Ledger::add_block` already mutates four structures as one
+    /// indivisible step: the account chain gains a block, the send
+    /// index gains or loses an entry, the consumed-source set may gain
+    /// a hash, and the supply accumulator may change. In memory that
+    /// indivisibility is free — `&mut self` and no early return past
+    /// the first mutation. Persisted, it has to be bought back, and a
+    /// crash between any two writes would leave state the ledger
+    /// rejects as corrupt at best and silently accepts as valid at
+    /// worst: a send-index entry whose block was never written is
+    /// spendable value that no chain records.
+    ///
+    /// There is deliberately no default implementation. A sequential
+    /// fallback would compile and pass casual tests while violating the
+    /// contract, so every backend is forced to state how it complies.
+    fn apply_batch(&mut self, ops: &[BatchOp<'_>]) -> Result<(), ArxiaError>;
 }
 
 /// In-memory storage backend for testing.
 pub struct MemoryStorage {
-    data: HashMap<Vec<u8>, Vec<u8>>,
+    data: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 impl MemoryStorage {
     /// Create a new empty in-memory store.
     pub fn new() -> Self {
         Self {
-            data: HashMap::new(),
+            data: BTreeMap::new(),
         }
     }
 }
@@ -132,12 +221,56 @@ impl StorageBackend for MemoryStorage {
         Ok(self.data.get(key).cloned())
     }
     fn delete(&mut self, key: &[u8]) -> Result<bool, ArxiaError> {
-        // `HashMap::remove` returns `Option<V>` — `Some` iff the
+        // `BTreeMap::remove` returns `Option<V>` — `Some` iff the
         // key was present. Map to the existence-signaling bool.
         Ok(self.data.remove(key).is_some())
     }
     fn contains(&self, key: &[u8]) -> Result<bool, ArxiaError> {
         Ok(self.data.contains_key(key))
+    }
+
+    fn scan_prefix(
+        &self,
+        prefix: &[u8],
+        visit: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<(), ArxiaError> {
+        // BTreeMap iterates in ascending key order, so walking from the
+        // first key at or after `prefix` and stopping at the first key
+        // that no longer starts with it visits exactly the range, in
+        // order, without scanning the rest of the store.
+        for (k, v) in self.data.range(prefix.to_vec()..) {
+            if !k.starts_with(prefix) {
+                break;
+            }
+            if !visit(k, v) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_batch(&mut self, ops: &[BatchOp<'_>]) -> Result<(), ArxiaError> {
+        // Compliance with the atomicity contract: the batch is staged
+        // against a clone, and the clone replaces the live map only
+        // once every operation has succeeded. A failure part-way leaves
+        // `self.data` untouched because it was never written to.
+        //
+        // The clone costs a full copy of the store. That is acceptable
+        // here — this backend exists for tests — and is precisely the
+        // cost a real backend avoids with a write-ahead log.
+        let mut staged = self.data.clone();
+        for op in ops {
+            match op {
+                BatchOp::Put { key, value } => {
+                    staged.insert(key.to_vec(), value.to_vec());
+                }
+                BatchOp::Delete { key } => {
+                    staged.remove(*key);
+                }
+            }
+        }
+        self.data = staged;
+        Ok(())
     }
 }
 
@@ -164,7 +297,7 @@ enum StagedOp {
 /// returns `None`/`false` even if it exists in the store).
 pub struct MemoryTransaction<'a> {
     store: &'a mut MemoryStorage,
-    staged: HashMap<Vec<u8>, StagedOp>,
+    staged: BTreeMap<Vec<u8>, StagedOp>,
     /// Set to `true` by `commit()` so `Drop` knows not to
     /// re-rollback (commit consumed `self`, but a panic during
     /// commit's body would leave us in an in-between state).
@@ -255,7 +388,7 @@ impl MemoryStorage {
     pub fn begin_transaction(&mut self) -> MemoryTransaction<'_> {
         MemoryTransaction {
             store: self,
-            staged: HashMap::new(),
+            staged: BTreeMap::new(),
             committed: false,
         }
     }
@@ -287,7 +420,7 @@ impl MemoryStorage {
 /// synchronise internally via [`std::sync::Mutex`]. Designed for
 /// `Arc<ConcurrentMemoryStorage>` sharing across threads ; the
 /// `Arc` provides the shared ownership, the internal `Mutex`
-/// provides exclusion on the underlying `HashMap`. Each operation
+/// provides exclusion on the underlying `BTreeMap`. Each operation
 /// is atomic with respect to every other operation.
 ///
 /// This is **not** an implementation of [`StorageBackend`] (whose
@@ -317,14 +450,14 @@ impl MemoryStorage {
 /// assert_eq!(store.len().unwrap(), 4);
 /// ```
 pub struct ConcurrentMemoryStorage {
-    data: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+    data: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 impl ConcurrentMemoryStorage {
     /// Create a new empty thread-safe in-memory store.
     pub fn new() -> Self {
         Self {
-            data: Mutex::new(HashMap::new()),
+            data: Mutex::new(BTreeMap::new()),
         }
     }
 
