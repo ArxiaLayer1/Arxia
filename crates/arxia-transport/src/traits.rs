@@ -28,6 +28,17 @@ pub struct TransportMessage {
     pub timestamp: u64,
 }
 
+/// Default two-sided clock-skew window for transport-message
+/// freshness, in MILLISECONDS — `TransportMessage::timestamp` is a
+/// millisecond count, unlike the relay receipt which uses seconds.
+///
+/// One minute. A transport message is per-hop and ephemeral: it is
+/// signed and sent in the same forwarding decision, so legitimate
+/// latency is bounded by link RTT plus queuing. Callers on bursty
+/// links (LoRa, satellite) can pass a larger value to
+/// [`SignedTransportMessage::verify_at`].
+pub const TRANSPORT_FRESHNESS_WINDOW_MS: u64 = 60 * 1_000;
+
 /// A [`TransportMessage`] paired with an Ed25519 signature that
 /// authenticates the `from` field. See HIGH-012 in the
 /// crate-level docstring.
@@ -108,6 +119,37 @@ impl SignedTransportMessage {
         Self { message, signature }
     }
 
+    /// Verify the signature AND bound the timestamp to `now_ms`.
+    ///
+    /// [`Self::verify`] authenticates the message but says nothing
+    /// about when it was sent, so a captured message replays forever.
+    /// Production ingress should call this instead.
+    ///
+    /// Two-sided: too far in the past is a replay, too far in the
+    /// future is a pre-mint. Both give
+    /// [`TransportError::TimestampStale`].
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::verify`] returns, plus `TimestampStale`.
+    pub fn verify_at(&self, now_ms: u64, max_skew_ms: u64) -> Result<(), TransportError> {
+        self.verify()?;
+        let ts = self.message.timestamp;
+        let delta = if ts > now_ms {
+            ts - now_ms
+        } else {
+            now_ms - ts
+        };
+        if delta > max_skew_ms {
+            return Err(TransportError::TimestampStale {
+                timestamp: ts,
+                now: now_ms,
+                max_skew: max_skew_ms,
+            });
+        }
+        Ok(())
+    }
+
     /// Verify the signature on a received transport message.
     ///
     /// Returns `Ok(())` iff:
@@ -175,6 +217,18 @@ pub enum TransportError {
     /// this variant; a peer cannot claim someone else's
     /// identity at the transport layer.
     SignatureInvalid,
+    /// The message timestamp is outside the accepted freshness window
+    /// relative to the verifier's clock. Returned only by
+    /// [`SignedTransportMessage::verify_at`]; plain `verify` does no
+    /// clock comparison.
+    TimestampStale {
+        /// The message timestamp, in milliseconds since epoch.
+        timestamp: u64,
+        /// The verifier's clock, in milliseconds since epoch.
+        now: u64,
+        /// Accepted deviation either side, in milliseconds.
+        max_skew: u64,
+    },
     /// Generic transport error.
     Other(String),
 }
@@ -203,6 +257,14 @@ impl std::fmt::Display for TransportError {
                 )
             }
             Self::Other(msg) => write!(f, "transport error: {}", msg),
+            Self::TimestampStale {
+                timestamp,
+                now,
+                max_skew,
+            } => write!(
+                f,
+                "message timestamp {timestamp}ms is outside the +/-{max_skew}ms window around {now}ms"
+            ),
         }
     }
 }
