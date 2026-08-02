@@ -12,7 +12,9 @@ pub mod error;
 pub mod types;
 
 pub use constants::*;
-pub use error::{ArxiaError, GenesisRule, SerializedItem, SignatureFault, TransportFault};
+pub use error::{
+    ArxiaError, DidFault, GenesisRule, KeyFault, SerializedItem, SignatureFault, TransportFault,
+};
 pub use types::*;
 
 // ============================================================

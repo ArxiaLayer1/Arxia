@@ -265,7 +265,7 @@ impl RelayReceipt {
             .try_into()
             .map_err(|_| RelayReceiptError::InvalidSignatureLength)?;
         arxia_crypto::verify(&pk, &msg, &sig).map_err(|e| match e {
-            ArxiaError::InvalidKey(_) => RelayReceiptError::InvalidPublicKey,
+            ArxiaError::InvalidKey { .. } => RelayReceiptError::InvalidPublicKey,
             _ => RelayReceiptError::SignatureInvalid,
         })
     }

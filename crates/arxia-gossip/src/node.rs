@@ -6,7 +6,7 @@ use crate::nonce_registry::{
     merge_nonce_registries, sync_nonces_before_l1, NonceConflict, NonceKey, NonceRegistry,
     SyncResult,
 };
-use arxia_core::{ArxiaError, SignatureFault};
+use arxia_core::{ArxiaError, KeyFault, SignatureFault};
 use arxia_lattice::block::Block;
 use arxia_lattice::validation::verify_block;
 
@@ -131,9 +131,13 @@ impl GossipNode {
             .try_into()
             .map_err(|_| ArxiaError::HashMismatch)?;
         let account_bytes: [u8; 32] = hex::decode(&block.account)
-            .map_err(|e| ArxiaError::InvalidKey(e.to_string()))?
+            .map_err(|_| ArxiaError::InvalidKey {
+                fault: KeyFault::HexEncoding,
+            })?
             .try_into()
-            .map_err(|_| ArxiaError::InvalidKey("bad key length".into()))?;
+            .map_err(|v: Vec<u8>| ArxiaError::InvalidKey {
+                fault: KeyFault::Length { got: v.len() },
+            })?;
 
         let key = (account_bytes, block.nonce);
         match self.nonce_registry.get(&key) {

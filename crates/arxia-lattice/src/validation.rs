@@ -12,7 +12,7 @@
 //! documented at the `arxia_crypto::ed25519` module level.
 
 use crate::block::{Block, BlockType};
-use arxia_core::{ArxiaError, GenesisRule, SignatureFault};
+use arxia_core::{ArxiaError, GenesisRule, KeyFault, SignatureFault};
 
 /// Verify a single block hash and Ed25519 signature.
 pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
@@ -28,9 +28,13 @@ pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
         return Err(ArxiaError::HashMismatch);
     }
     let pubkey_bytes: [u8; 32] = hex::decode(&block.account)
-        .map_err(|e| ArxiaError::InvalidKey(e.to_string()))?
+        .map_err(|_| ArxiaError::InvalidKey {
+            fault: KeyFault::HexEncoding,
+        })?
         .try_into()
-        .map_err(|_| ArxiaError::InvalidKey("bad key length".into()))?;
+        .map_err(|v: Vec<u8>| ArxiaError::InvalidKey {
+            fault: KeyFault::Length { got: v.len() },
+        })?;
     // Reject low-order / off-curve pubkeys at parse time, BEFORE
     // any signature work. This is the parse-side mirror of the
     // strict verify below.

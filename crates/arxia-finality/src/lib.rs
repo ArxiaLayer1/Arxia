@@ -252,7 +252,7 @@ fn verify_signature(
         .try_into()
         .map_err(|_| FinalityError::InvalidSignatureLength)?;
     arxia_crypto::verify(pubkey, canonical, &sig).map_err(|e| match e {
-        ArxiaError::InvalidKey(_) => FinalityError::InvalidPublicKey,
+        ArxiaError::InvalidKey { .. } => FinalityError::InvalidPublicKey,
         _ => FinalityError::SignatureInvalid,
     })
 }

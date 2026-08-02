@@ -19,7 +19,7 @@
 //! length error). Callers MUST handle the `Err` arm at compile time.
 
 use crate::block::{Block, BlockType};
-use arxia_core::{ArxiaError, SignatureFault, COMPACT_BLOCK_SIZE};
+use arxia_core::{ArxiaError, KeyFault, SignatureFault, COMPACT_BLOCK_SIZE};
 
 /// Decode a hex string into a fixed-size 32-byte array. Loud failure
 /// on bad input: `Err(ArxiaError::HexDecode)` for non-hex,
@@ -27,11 +27,12 @@ use arxia_core::{ArxiaError, SignatureFault, COMPACT_BLOCK_SIZE};
 fn hex_decode_32(field_name: &str, s: &str) -> Result<[u8; 32], ArxiaError> {
     let v = hex::decode(s).map_err(ArxiaError::HexDecode)?;
     let len = v.len();
-    v.as_slice().try_into().map_err(|_| {
-        ArxiaError::InvalidKey(format!(
-            "{} must be 64 hex chars (32 bytes), got {} bytes",
-            field_name, len
-        ))
+    // `field_name` names which 32-byte field was malformed; it is
+    // context for the doc comment above, not discriminant data, and
+    // the typed fault carries the byte count that actually varies.
+    let _ = field_name;
+    v.as_slice().try_into().map_err(|_| ArxiaError::InvalidKey {
+        fault: KeyFault::Length { got: len },
     })
 }
 
@@ -395,7 +396,7 @@ mod tests {
         block.account = "ab".repeat(8); // 16 chars = 8 bytes
         let result = to_compact_bytes(&block);
         assert!(
-            matches!(result, Err(ArxiaError::InvalidKey(_))),
+            matches!(result, Err(ArxiaError::InvalidKey { .. })),
             "expected InvalidKey, got {:?}",
             result
         );

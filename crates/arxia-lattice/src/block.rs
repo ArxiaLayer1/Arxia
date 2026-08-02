@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use arxia_core::{ArxiaError, SerializedItem};
+use arxia_core::{ArxiaError, KeyFault, SerializedItem};
 
 /// The type of operation a block represents.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -106,9 +106,13 @@ impl Block {
         // from entering any storage / gossip / persistence path
         // even before it reaches verify).
         let pubkey_bytes: [u8; 32] = hex::decode(account)
-            .map_err(|e| ArxiaError::InvalidKey(e.to_string()))?
+            .map_err(|_| ArxiaError::InvalidKey {
+                fault: KeyFault::HexEncoding,
+            })?
             .try_into()
-            .map_err(|_| ArxiaError::InvalidKey("bad key length".into()))?;
+            .map_err(|v: Vec<u8>| ArxiaError::InvalidKey {
+                fault: KeyFault::Length { got: v.len() },
+            })?;
         arxia_crypto::validate_pubkey_strict(&pubkey_bytes)?;
         let bt_json = serde_json::to_string(block_type).map_err(|_| ArxiaError::Serialization {
             item: SerializedItem::BlockType,

@@ -135,9 +135,23 @@ pub enum ArxiaError {
         item: SerializedItem,
     },
 
-    /// Invalid cryptographic key.
-    #[error("invalid key: {0}")]
-    InvalidKey(String),
+    /// A 32-byte Ed25519 public key failed structural or curve
+    /// validation.
+    #[error("invalid key: {fault}")]
+    InvalidKey {
+        /// What exactly is wrong with the key.
+        fault: KeyFault,
+    },
+
+    /// A DID string failed to parse. Split from [`ArxiaError::InvalidKey`]:
+    /// a malformed identifier string and a cryptographically unusable
+    /// key are different signals, and only the latter concerns the
+    /// curve.
+    #[error("invalid DID: {fault}")]
+    InvalidDid {
+        /// What exactly is wrong with the DID string.
+        fault: DidFault,
+    },
 
     /// A storage backend failed: an I/O error, a corrupted database,
     /// or a poisoned lock. Introduced with the first persistent
@@ -306,6 +320,48 @@ pub enum GenesisRule {
     PreviousMustBeEmpty,
 }
 
+/// The specific fault behind an [`ArxiaError::InvalidKey`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum KeyFault {
+    /// The bytes do not decode to a point on the Ed25519 curve.
+    #[error("not a valid point on the Ed25519 curve")]
+    NotOnCurve,
+    /// The point is low-order (small-subgroup / weak), rejected by
+    /// strict validation even though it is on the curve.
+    #[error("low-order (weak) public key")]
+    WeakPoint,
+    /// The key is not exactly 32 bytes.
+    #[error("expected 32 key bytes, got {got}")]
+    Length {
+        /// The byte count actually supplied.
+        got: usize,
+    },
+    /// The account field is not valid hex, so no key bytes could be
+    /// recovered at all.
+    #[error("the account field is not valid hex")]
+    HexEncoding,
+}
+
+/// The specific fault behind an [`ArxiaError::InvalidDid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DidFault {
+    /// The string does not start with the canonical `did:arxia:`
+    /// prefix.
+    #[error("missing the required 'did:arxia:' prefix")]
+    MissingPrefix,
+    /// The identifier part is not valid base58.
+    #[error("the identifier is not valid base58")]
+    Base58,
+    /// The identifier decodes to the wrong number of bytes.
+    #[error("the identifier must decode to {expected} bytes, got {got}")]
+    Length {
+        /// The byte count actually decoded.
+        got: usize,
+        /// The byte count the DID scheme requires.
+        expected: usize,
+    },
+}
+
 /// The specific fault behind an [`ArxiaError::SignatureInvalid`].
 ///
 /// `Verification` is the cryptographic failure: well-formed inputs,
@@ -405,6 +461,33 @@ mod tests {
     /// R2 of the typed-error rework: `Display` must stay operator-
     /// readable. Each rule renders a sentence carrying its payload,
     /// not a bare variant name.
+    /// R2 for the key and DID families.
+    #[test]
+    fn key_and_did_display_are_operator_readable() {
+        let k = ArxiaError::InvalidKey {
+            fault: KeyFault::Length { got: 31 },
+        };
+        let msg = k.to_string();
+        assert!(
+            msg.contains("invalid key") && msg.contains("got 31"),
+            "wrapper must carry family and payload: {msg}"
+        );
+        assert!(KeyFault::WeakPoint.to_string().contains("weak"));
+
+        let d = ArxiaError::InvalidDid {
+            fault: DidFault::Length {
+                got: 30,
+                expected: 32,
+            },
+        };
+        let msg = d.to_string();
+        assert!(
+            msg.contains("invalid DID") && msg.contains("30") && msg.contains("32"),
+            "wrapper must carry family and both payloads: {msg}"
+        );
+        assert!(DidFault::MissingPrefix.to_string().contains("did:arxia:"));
+    }
+
     /// R2 for the signature family.
     #[test]
     fn signature_fault_display_is_operator_readable() {

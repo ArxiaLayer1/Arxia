@@ -135,7 +135,7 @@ impl SlashingProof {
             .try_into()
             .map_err(|_| SlashingError::InvalidSignatureLength)?;
         arxia_crypto::verify(&self.observer_pubkey, &msg, &sig).map_err(|e| match e {
-            ArxiaError::InvalidKey(_) => SlashingError::InvalidObserverPubkey,
+            ArxiaError::InvalidKey { .. } => SlashingError::InvalidObserverPubkey,
             _ => SlashingError::SignatureInvalid,
         })
     }

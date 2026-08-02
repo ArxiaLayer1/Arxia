@@ -438,7 +438,7 @@ mod tests {
                 result,
                 Err(ArxiaError::HashMismatch)
                     | Err(ArxiaError::SignatureInvalid { .. })
-                    | Err(ArxiaError::InvalidKey(_))
+                    | Err(ArxiaError::InvalidKey { .. })
             ),
             "expected verification failure, got {:?}",
             result
