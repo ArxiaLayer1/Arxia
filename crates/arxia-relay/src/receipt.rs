@@ -88,6 +88,18 @@ pub enum RelayReceiptError {
         /// The protocol cap, [`MAX_HOPS_PER_RECEIPT`].
         max: u8,
     },
+    /// The receipt timestamp is outside the accepted freshness window
+    /// relative to the verifier's clock. Returned only by
+    /// [`RelayReceipt::verify_at`]; plain [`RelayReceipt::verify`] does
+    /// no clock comparison.
+    TimestampStale {
+        /// The receipt timestamp, in Unix seconds.
+        timestamp: u64,
+        /// The verifier's clock, in Unix seconds.
+        now: u64,
+        /// Accepted deviation either side, in seconds.
+        max_skew: u64,
+    },
 }
 
 impl std::fmt::Display for RelayReceiptError {
@@ -111,11 +123,29 @@ impl std::fmt::Display for RelayReceiptError {
             Self::HopCountTooHigh { got, max } => {
                 write!(f, "hop_count {got} exceeds protocol cap {max}")
             }
+            Self::TimestampStale {
+                timestamp,
+                now,
+                max_skew,
+            } => write!(
+                f,
+                "receipt timestamp {timestamp}s is outside the +/-{max_skew}s window around {now}s"
+            ),
         }
     }
 }
 
 impl std::error::Error for RelayReceiptError {}
+
+/// Default two-sided clock-skew window for receipt freshness, in
+/// SECONDS — `RelayReceipt::timestamp` is a Unix second count, not
+/// milliseconds.
+///
+/// Five minutes. Receipts may legitimately be batched and forwarded
+/// later on intermittently-connected links, so the window is wider
+/// than for a per-hop transport message. Callers on a tighter link can
+/// pass their own value to [`RelayReceipt::verify_at`].
+pub const RECEIPT_FRESHNESS_WINDOW_SECS: u64 = 5 * 60;
 
 /// A receipt proving that a relay node forwarded a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +196,36 @@ impl RelayReceipt {
         buf.extend_from_slice(&self.timestamp.to_be_bytes());
         buf.push(self.hop_count);
         Ok(buf)
+    }
+
+    /// Verify the receipt AND bound its timestamp to `now_secs`.
+    ///
+    /// [`Self::verify`] proves the receipt is authentic but says
+    /// nothing about when it was minted, so a captured receipt stays
+    /// valid forever. Production ingress should call this instead.
+    ///
+    /// The window is two-sided: a timestamp too far in the past is a
+    /// replay, one too far in the future is a pre-mint. Both are
+    /// rejected with [`RelayReceiptError::TimestampStale`].
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::verify`] returns, plus `TimestampStale`.
+    pub fn verify_at(&self, now_secs: u64, max_skew_secs: u64) -> Result<(), RelayReceiptError> {
+        self.verify()?;
+        let delta = if self.timestamp > now_secs {
+            self.timestamp - now_secs
+        } else {
+            now_secs - self.timestamp
+        };
+        if delta > max_skew_secs {
+            return Err(RelayReceiptError::TimestampStale {
+                timestamp: self.timestamp,
+                now: now_secs,
+                max_skew: max_skew_secs,
+            });
+        }
+        Ok(())
     }
 
     /// Verify the Ed25519 signature on this receipt against the pubkey
