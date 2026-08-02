@@ -28,6 +28,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use core::time::Duration;
+
 use arxia_core::ArxiaError;
 
 /// Domain-separation prefix for the Ed25519 signature on a
@@ -137,15 +139,19 @@ impl std::fmt::Display for RelayReceiptError {
 
 impl std::error::Error for RelayReceiptError {}
 
-/// Default two-sided clock-skew window for receipt freshness, in
-/// SECONDS — `RelayReceipt::timestamp` is a Unix second count, not
-/// milliseconds.
+/// Default two-sided clock-skew window for receipt freshness.
+///
+/// Typed as a [`Duration`] rather than a bare integer on purpose: the
+/// receipt timestamp is counted in seconds while the transport layer
+/// counts milliseconds, and a bare integer let the wrong constant be
+/// passed to the wrong function — silently widening the window by a
+/// factor of 1000. A `Duration` carries its own unit, so a mix-up now
+/// yields the wrong *magnitude* at worst, never the wrong scale.
 ///
 /// Five minutes. Receipts may legitimately be batched and forwarded
-/// later on intermittently-connected links, so the window is wider
-/// than for a per-hop transport message. Callers on a tighter link can
-/// pass their own value to [`RelayReceipt::verify_at`].
-pub const RECEIPT_FRESHNESS_WINDOW_SECS: u64 = 5 * 60;
+/// later over intermittent links, so the window is wider than for a
+/// per-hop transport message.
+pub const RECEIPT_FRESHNESS_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// A receipt proving that a relay node forwarded a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,7 +217,8 @@ impl RelayReceipt {
     /// # Errors
     ///
     /// Everything [`Self::verify`] returns, plus `TimestampStale`.
-    pub fn verify_at(&self, now_secs: u64, max_skew_secs: u64) -> Result<(), RelayReceiptError> {
+    pub fn verify_at(&self, now_secs: u64, max_skew: Duration) -> Result<(), RelayReceiptError> {
+        let max_skew_secs = max_skew.as_secs();
         self.verify()?;
         let delta = if self.timestamp > now_secs {
             self.timestamp - now_secs

@@ -1,6 +1,8 @@
 //! Transport trait definition.
 
 use arxia_core::ArxiaError;
+use core::time::Duration;
+
 use ed25519_dalek::SigningKey;
 
 /// Domain-separation prefix for the Ed25519 signature on a
@@ -28,16 +30,19 @@ pub struct TransportMessage {
     pub timestamp: u64,
 }
 
-/// Default two-sided clock-skew window for transport-message
-/// freshness, in MILLISECONDS — `TransportMessage::timestamp` is a
-/// millisecond count, unlike the relay receipt which uses seconds.
+/// Default two-sided clock-skew window for transport-message freshness.
 ///
-/// One minute. A transport message is per-hop and ephemeral: it is
-/// signed and sent in the same forwarding decision, so legitimate
-/// latency is bounded by link RTT plus queuing. Callers on bursty
-/// links (LoRa, satellite) can pass a larger value to
-/// [`SignedTransportMessage::verify_at`].
-pub const TRANSPORT_FRESHNESS_WINDOW_MS: u64 = 60 * 1_000;
+/// Typed as a [`Duration`] rather than a bare integer on purpose: this
+/// layer counts milliseconds while relay receipts count seconds, and a
+/// bare integer let the wrong constant be passed to the wrong function
+/// — silently widening the window by a factor of 1000. A `Duration`
+/// carries its own unit, so a mix-up now yields the wrong *magnitude*
+/// at worst, never the wrong scale.
+///
+/// One minute. A transport message is per-hop and ephemeral: signed
+/// and sent within the same forwarding decision, so legitimate latency
+/// is bounded by link RTT plus queuing.
+pub const TRANSPORT_FRESHNESS_WINDOW: Duration = Duration::from_secs(60);
 
 /// A [`TransportMessage`] paired with an Ed25519 signature that
 /// authenticates the `from` field. See HIGH-012 in the
@@ -132,7 +137,8 @@ impl SignedTransportMessage {
     /// # Errors
     ///
     /// Everything [`Self::verify`] returns, plus `TimestampStale`.
-    pub fn verify_at(&self, now_ms: u64, max_skew_ms: u64) -> Result<(), TransportError> {
+    pub fn verify_at(&self, now_ms: u64, max_skew: Duration) -> Result<(), TransportError> {
+        let max_skew_ms = u64::try_from(max_skew.as_millis()).unwrap_or(u64::MAX);
         self.verify()?;
         let ts = self.message.timestamp;
         let delta = if ts > now_ms {
