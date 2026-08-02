@@ -22,9 +22,14 @@ pub enum ArxiaError {
     #[error("hash mismatch")]
     HashMismatch,
 
-    /// Ed25519 signature verification failed.
-    #[error("signature verification failed: {0}")]
-    SignatureInvalid(String),
+    /// Ed25519 signature verification failed, structurally or
+    /// cryptographically. The fault says which — the two are
+    /// different adversarial signals and must stay routable.
+    #[error("signature invalid: {fault}")]
+    SignatureInvalid {
+        /// What exactly failed.
+        fault: SignatureFault,
+    },
 
     /// Insufficient balance for the operation.
     #[error("insufficient balance: {available} < {required}")]
@@ -279,6 +284,40 @@ pub enum GenesisRule {
     PreviousMustBeEmpty,
 }
 
+/// The specific fault behind an [`ArxiaError::SignatureInvalid`].
+///
+/// `Verification` is the cryptographic failure: well-formed inputs,
+/// equation does not hold (dalek `verify_strict`, canonical-S and
+/// low-order rejection included). The other two are structural: the
+/// bytes never reached the equation. A peer submitting well-formed
+/// blocks that fail verification looks like tampering or key
+/// confusion; a peer submitting structurally malformed blocks looks
+/// like a broken or hostile serializer. Scoring may weigh them
+/// differently, so the discriminant keeps them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SignatureFault {
+    /// The Ed25519 equation did not verify under the account key.
+    #[error("the signature does not verify under the account key")]
+    Verification,
+    /// The signature is not exactly 64 bytes.
+    #[error("expected a 64-byte signature, got {got} bytes")]
+    Length {
+        /// The length actually supplied.
+        got: usize,
+    },
+    /// The block's hash field is not valid hex, so there was nothing
+    /// well-formed to verify against.
+    ///
+    /// Defense-in-depth: on the current verify path this cannot fire,
+    /// because the recompute-and-compare check runs first and the
+    /// recomputed hash is always valid hex. It exists so the decode
+    /// that follows maps to a typed fault instead of a panic path,
+    /// and so a future reordering of the checks fails loudly into a
+    /// meaningful variant.
+    #[error("the block hash field is not valid hex")]
+    HashEncoding,
+}
+
 /// The specific fault behind an [`ArxiaError::Transport`].
 ///
 /// Mirrors the transport crate's own error type field-for-field; the
@@ -344,6 +383,23 @@ mod tests {
     /// R2 of the typed-error rework: `Display` must stay operator-
     /// readable. Each rule renders a sentence carrying its payload,
     /// not a bare variant name.
+    /// R2 for the signature family.
+    #[test]
+    fn signature_fault_display_is_operator_readable() {
+        let l = ArxiaError::SignatureInvalid {
+            fault: SignatureFault::Length { got: 63 },
+        };
+        let msg = l.to_string();
+        assert!(
+            msg.contains("signature invalid") && msg.contains("got 63 bytes"),
+            "wrapper must carry family and payload: {msg}"
+        );
+        let v = SignatureFault::Verification.to_string();
+        assert!(v.contains("does not verify"));
+        let h = SignatureFault::HashEncoding.to_string();
+        assert!(h.contains("hex"));
+    }
+
     /// R2 for the transport and serialization families.
     #[test]
     fn transport_and_serialization_display_are_operator_readable() {

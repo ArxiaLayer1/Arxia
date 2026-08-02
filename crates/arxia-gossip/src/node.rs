@@ -6,7 +6,7 @@ use crate::nonce_registry::{
     merge_nonce_registries, sync_nonces_before_l1, NonceConflict, NonceKey, NonceRegistry,
     SyncResult,
 };
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, SignatureFault};
 use arxia_lattice::block::Block;
 use arxia_lattice::validation::verify_block;
 
@@ -125,7 +125,9 @@ impl GossipNode {
         verify_block(&block)?;
 
         let hash_bytes: [u8; 32] = hex::decode(&block.hash)
-            .map_err(|e| ArxiaError::SignatureInvalid(e.to_string()))?
+            .map_err(|_| ArxiaError::SignatureInvalid {
+                fault: SignatureFault::HashEncoding,
+            })?
             .try_into()
             .map_err(|_| ArxiaError::HashMismatch)?;
         let account_bytes: [u8; 32] = hex::decode(&block.account)
@@ -298,7 +300,7 @@ mod tests {
         let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.signature = vec![0u8; 64];
         let result = node.add_block(block);
-        assert!(matches!(result, Err(ArxiaError::SignatureInvalid(_))));
+        assert!(matches!(result, Err(ArxiaError::SignatureInvalid { .. })));
         assert!(node.known_blocks.is_empty());
         assert!(node.nonce_registry.is_empty());
     }

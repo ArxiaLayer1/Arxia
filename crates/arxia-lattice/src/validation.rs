@@ -12,7 +12,7 @@
 //! documented at the `arxia_crypto::ed25519` module level.
 
 use crate::block::{Block, BlockType};
-use arxia_core::{ArxiaError, GenesisRule};
+use arxia_core::{ArxiaError, GenesisRule, SignatureFault};
 
 /// Verify a single block hash and Ed25519 signature.
 pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
@@ -35,13 +35,19 @@ pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
     // any signature work. This is the parse-side mirror of the
     // strict verify below.
     arxia_crypto::validate_pubkey_strict(&pubkey_bytes)?;
-    let sig_bytes: [u8; 64] = block
-        .signature
-        .as_slice()
-        .try_into()
-        .map_err(|_| ArxiaError::SignatureInvalid("bad sig length".into()))?;
-    let hash_bytes =
-        hex::decode(&block.hash).map_err(|e| ArxiaError::SignatureInvalid(e.to_string()))?;
+    let sig_bytes: [u8; 64] =
+        block
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| ArxiaError::SignatureInvalid {
+                fault: SignatureFault::Length {
+                    got: block.signature.len(),
+                },
+            })?;
+    let hash_bytes = hex::decode(&block.hash).map_err(|_| ArxiaError::SignatureInvalid {
+        fault: SignatureFault::HashEncoding,
+    })?;
     // Route through arxia_crypto::verify, which calls dalek's
     // `verify_strict` (canonical-S enforcement + low-order
     // rejection at the equation level).
@@ -391,6 +397,54 @@ mod tests {
             verify_chain_integrity(&[bad_prev]),
             Err(ArxiaError::InvalidGenesis {
                 rule: GenesisRule::PreviousMustBeEmpty
+            })
+        ));
+    }
+
+    /// R3 of the typed-error rework, signature family: a structural
+    /// failure (wrong length, unparseable hash) and the cryptographic
+    /// failure (equation does not hold) are different adversarial
+    /// signals, and each must surface under its own discriminant.
+    /// A change collapsing them fails one of these asserts.
+    #[test]
+    fn each_signature_failure_has_its_own_discriminant() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        chain.open(1_000_000, &mut vc).unwrap();
+
+        // Cause 1: signature of the wrong length — structurally
+        // malformed, never reaches the verify equation.
+        let mut short_sig = chain.chain[0].clone();
+        short_sig.signature = vec![0xAA; 63];
+        assert!(matches!(
+            verify_block(&short_sig),
+            Err(ArxiaError::SignatureInvalid {
+                fault: SignatureFault::Length { got: 63 }
+            })
+        ));
+
+        // A tampered hash cannot reach the HashEncoding path: the
+        // recompute-and-compare fires first, and the recomputed hash
+        // is always valid hex, so a block that passes the mismatch
+        // check has a decodable hash by construction. HashEncoding is
+        // therefore defense-in-depth on the decode that follows —
+        // asserted here so the day the check order changes, this
+        // stops being true loudly rather than silently.
+        let mut bad_hash = chain.chain[0].clone();
+        bad_hash.hash = "zzzz-not-hex".to_string();
+        assert!(matches!(
+            verify_block(&bad_hash),
+            Err(ArxiaError::HashMismatch)
+        ));
+
+        // Cause 3: well-formed 64-byte signature that simply does not
+        // verify — the cryptographic failure.
+        let mut forged = chain.chain[0].clone();
+        forged.signature = vec![0x01; 64];
+        assert!(matches!(
+            verify_block(&forged),
+            Err(ArxiaError::SignatureInvalid {
+                fault: SignatureFault::Verification
             })
         ));
     }

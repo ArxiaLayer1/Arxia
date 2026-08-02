@@ -414,7 +414,7 @@ mod tests {
         block.signature[0] ^= 0xFF;
         let result = ledger.add_block(block);
         assert!(
-            matches!(result, Err(ArxiaError::SignatureInvalid(_))),
+            matches!(result, Err(ArxiaError::SignatureInvalid { .. })),
             "expected SignatureInvalid, got {:?}",
             result
         );
@@ -437,7 +437,7 @@ mod tests {
             matches!(
                 result,
                 Err(ArxiaError::HashMismatch)
-                    | Err(ArxiaError::SignatureInvalid(_))
+                    | Err(ArxiaError::SignatureInvalid { .. })
                     | Err(ArxiaError::InvalidKey(_))
             ),
             "expected verification failure, got {:?}",
@@ -454,7 +454,7 @@ mod tests {
         let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.signature = vec![0u8; 64];
         let result = ledger.add_block(block);
-        assert!(matches!(result, Err(ArxiaError::SignatureInvalid(_))));
+        assert!(matches!(result, Err(ArxiaError::SignatureInvalid { .. })));
         assert!(ledger.get_chain(alice.id()).is_none());
     }
 

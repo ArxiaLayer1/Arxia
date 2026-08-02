@@ -19,7 +19,7 @@
 //! length error). Callers MUST handle the `Err` arm at compile time.
 
 use crate::block::{Block, BlockType};
-use arxia_core::{ArxiaError, COMPACT_BLOCK_SIZE};
+use arxia_core::{ArxiaError, SignatureFault, COMPACT_BLOCK_SIZE};
 
 /// Decode a hex string into a fixed-size 32-byte array. Loud failure
 /// on bad input: `Err(ArxiaError::HexDecode)` for non-hex,
@@ -136,10 +136,11 @@ pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
 /// byte-identical to [`to_compact_bytes`].
 pub fn to_compact_bytes_strict(block: &Block) -> Result<Vec<u8>, ArxiaError> {
     if block.signature.len() != 64 {
-        return Err(ArxiaError::SignatureInvalid(format!(
-            "compact-bytes serialization requires 64-byte signature, got {}",
-            block.signature.len()
-        )));
+        return Err(ArxiaError::SignatureInvalid {
+            fault: SignatureFault::Length {
+                got: block.signature.len(),
+            },
+        });
     }
     to_compact_bytes(block)
 }
@@ -586,11 +587,10 @@ mod tests {
         let err = to_compact_bytes_strict(&block)
             .expect_err("strict form must reject wrong-length signature");
         match err {
-            ArxiaError::SignatureInvalid(msg) => {
-                assert!(msg.contains("64"));
-                assert!(msg.contains("32"));
-            }
-            other => panic!("expected SignatureInvalid, got {other:?}"),
+            ArxiaError::SignatureInvalid {
+                fault: SignatureFault::Length { got },
+            } => assert_eq!(got, 32),
+            other => panic!("expected SignatureInvalid Length, got {other:?}"),
         }
     }
 
@@ -603,7 +603,12 @@ mod tests {
         block.signature = vec![0xBB; 65];
         let err =
             to_compact_bytes_strict(&block).expect_err("strict form must reject 65-byte signature");
-        assert!(matches!(err, ArxiaError::SignatureInvalid(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::SignatureInvalid {
+                fault: SignatureFault::Length { got: 65 }
+            }
+        ));
     }
 
     #[test]
