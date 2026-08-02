@@ -116,6 +116,68 @@ here AND a version pin in `deny.toml`.
 CI does not currently run this restricted-PATH probe — adding
 it as a CI step is tracked as a follow-up scope.
 
+## redb crash windows during file growth (4.1.0)
+
+### Affected version
+
+`redb = 4.1.0` (the version this workspace pins).
+
+### Behaviour
+
+The upstream changelog for the **unreleased** 4.2.0 documents two
+crash-window fixes that therefore exist in 4.1.0 :
+
+1. A crash during a transaction that grows the database file can
+   leave the database permanently unopenable afterward.
+2. A crash during a commit that resizes the database file can
+   leave the database permanently unopenable, reporting
+   corruption on subsequent opens, even though every committed
+   transaction was intact and fully recoverable.
+
+Both are crash-timing windows around file growth : a process
+death at the wrong instant does not lose a committed batch (the
+atomicity and recovery contract holds) but can lose the ability
+to *open* the file at all, which for a node is loss of the local
+ledger replica.
+
+### Workaround
+
+`arxia-storage-redb`'s kill-nine test pre-grows the database
+file in committed transactions *before* its kill window opens,
+so the growth path is mostly kept out of the crash-timing test
+(hammering a known-unfixed upstream window would only produce
+unactionable flakes). Nothing else avoids the window at runtime ;
+a node that dies mid-growth is exposed to it.
+
+### Why we accept
+
+Every redb release line still receiving fixes requires Rust
+1.89 ; the alternative within the old MSRV was the 2.6.x line,
+end-of-life since August 2025, which receives no fixes at all
+and whose exposure to these same windows is unknown. A
+maintained engine with two documented, soon-fixed windows was
+judged a smaller risk than an unmaintained one with an unknown
+set. RustSec lists no advisory for redb (checked 2026-08-02).
+
+### Mechanical anchor
+
+Two anchors. `deny.toml` pins the accepted envelope to exactly
+the audited 4.1.x line as the conventional record. The enforced
+one is `crates/arxia-storage-redb/tests/version_pin.rs`, which
+reads the resolved version out of `Cargo.lock` and fails the
+suite if redb drifts off 4.1.x — nothing in CI runs cargo-deny
+today, so the test is what actually stops a silent bump.
+
+### Regression detection
+
+When redb 4.2.0 ships, it is validated, not adopted : point the
+kill-nine harness at the exact paths the release claims to fix
+(remove the pre-growth mitigation, add an aggressive-growth
+round with large values), and only on green update the
+version-pin test, this entry, and deny.toml together. The
+kill-nine test itself is the regression net for the recovery
+contract on every future bump.
+
 ## Adding a new entry to this document
 
 When a new dependency is identified as having a build-script,
