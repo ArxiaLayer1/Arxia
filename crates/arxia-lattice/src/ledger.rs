@@ -181,6 +181,18 @@ impl Ledger {
         // Receive may credit — captured here for the conservation check.
         let mut credited_amount: u64 = 0;
         if let BlockType::Receive { source_hash } = &block.block_type {
+            // Order matters. `consumed_sends` is checked first because a
+            // consumed Send is evicted from `send_index` below: without
+            // this ordering a replayed Receive would surface as
+            // `UnknownSourceSend` and become indistinguishable from a
+            // phantom one. Membership in `consumed_sends` is itself proof
+            // the Send was real, since nothing enters that set without
+            // having passed the lookup.
+            if self.consumed_sends.contains(source_hash) {
+                return Err(ArxiaError::DuplicateReceive {
+                    source_hash: source_hash.clone(),
+                });
+            }
             let send_info =
                 self.send_index
                     .get(source_hash)
@@ -189,11 +201,6 @@ impl Ledger {
                     })?;
             if send_info.destination != block.account {
                 return Err(ArxiaError::WrongDestination);
-            }
-            if self.consumed_sends.contains(source_hash) {
-                return Err(ArxiaError::DuplicateReceive {
-                    source_hash: source_hash.clone(),
-                });
             }
             credited_amount = send_info.amount;
         }
@@ -324,6 +331,13 @@ impl Ledger {
                 );
             }
             BlockType::Receive { source_hash } => {
+                // A Send funds exactly one Receive, so once consumed its
+                // entry can never be read again: `consumed_sends` alone
+                // answers every later question about it. Dropping the
+                // `send_index` entry releases the destination string and
+                // amount that would otherwise be retained for the life of
+                // the ledger.
+                self.send_index.remove(source_hash);
                 self.consumed_sends.insert(source_hash.clone());
             }
             BlockType::Open { initial_balance } => {
