@@ -193,6 +193,34 @@ pub enum ArxiaError {
         block_type: String,
     },
 
+    /// A block's self-declared `balance` disagrees with the value the
+    /// ledger derives from the account's prior balance and the block's
+    /// operation. `Ledger::add_block` derives balances from chain
+    /// history (Open mints `initial_balance`; Send debits `amount`;
+    /// Receive credits the cited Send's `amount`; Revoke is
+    /// balance-neutral) and rejects any block that disagrees. Without
+    /// this check a signed block could declare an arbitrary balance and
+    /// create value from nothing.
+    #[error("balance mismatch on account {account}: declared {got}, expected {expected}")]
+    BalanceMismatch {
+        /// Hex-encoded account public key.
+        account: String,
+        /// The balance derived from history plus the operation.
+        expected: u64,
+        /// The balance the block declared.
+        got: u64,
+    },
+
+    /// An `Open` block was submitted on a chain that already exists.
+    /// Only the first block of a chain may be an `Open`; a second one
+    /// would re-run the supply accumulator and overwrite the running
+    /// balance.
+    #[error("open rejected: account {account} already has an open chain")]
+    OpenNotGenesis {
+        /// Hex-encoded account public key.
+        account: String,
+    },
+
     /// A `Receive` block references a `source_hash` that does not
     /// correspond to any accepted `Send` block in the ledger.
     /// Phantom-receive defense: prevents a forged `Receive` citing
