@@ -32,7 +32,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 
 /// Domain-separation prefix for the Ed25519 signature that authorizes
 /// [`Escrow::release`].
@@ -147,7 +147,8 @@ impl Escrow {
         let msg = self.release_message()?;
         let vk = VerifyingKey::from_bytes(caller_pubkey).map_err(|_| "invalid caller pubkey")?;
         let sig = Signature::from_bytes(signature);
-        vk.verify(&msg, &sig).map_err(|_| "invalid signature")?;
+        vk.verify_strict(&msg, &sig)
+            .map_err(|_| "invalid signature")?;
         self.state = EscrowState::Released;
         Ok(())
     }
@@ -190,7 +191,8 @@ impl Escrow {
         let msg = self.refund_message()?;
         let vk = VerifyingKey::from_bytes(caller_pubkey).map_err(|_| "invalid caller pubkey")?;
         let sig = Signature::from_bytes(signature);
-        vk.verify(&msg, &sig).map_err(|_| "invalid signature")?;
+        vk.verify_strict(&msg, &sig)
+            .map_err(|_| "invalid signature")?;
         self.state = EscrowState::Refunded;
         Ok(())
     }
