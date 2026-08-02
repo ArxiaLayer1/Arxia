@@ -1,0 +1,17 @@
+[package]
+name = "arxia-storage-redb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "redb-backed persistent StorageBackend for Arxia nodes"
+authors = []
+
+[dependencies]
+arxia-core = { workspace = true }
+arxia-storage = { workspace = true }
+redb = { workspace = true }
+
+[dev-dependencies]
+arxia-storage = { workspace = true, features = ["conformance"] }
+tempfile = { workspace = true }

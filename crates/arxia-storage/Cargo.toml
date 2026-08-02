@@ -10,3 +10,13 @@ authors = []
 [dependencies]
 arxia-core = { path = "../arxia-core" }
 arxia-crypto = { path = "../arxia-crypto" }
+
+[features]
+# Exposes the generic StorageBackend conformance checks so backend
+# crates can hold their implementations to the same suite.
+conformance = []
+
+[dev-dependencies]
+# The crate's own trait-contract tests exercise the conformance module
+# too, which needs the feature on when this crate is the test subject.
+arxia-storage = { path = ".", features = ["conformance"] }

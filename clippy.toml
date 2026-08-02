@@ -4,7 +4,10 @@
 # matches `rust-toolchain.toml` and the workspace Cargo.toml ;
 # bumping it requires updating both files in lock-step.
 
-# Minimum supported Rust version. Pinned to 1.85.0 to keep
-# ESP32-targets compatible (esp-idf-sys's MSRV ladder lags the
-# stable channel ; check before bumping).
-msrv = "1.85.0"
+# Minimum supported Rust version. Must move in lock-step with
+# rust-toolchain.toml, the workspace Cargo.toml, targets/esp32,
+# and the LOW-014 pin test in arxia-core. Before bumping, check
+# the Xtensa toolchain (esp-rs/rust-build) has a matching
+# release — it tracks stable with a lag, and the T-Beam target
+# depends on it.
+msrv = "1.89.0"

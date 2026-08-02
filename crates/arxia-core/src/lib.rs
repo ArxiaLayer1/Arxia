@@ -76,8 +76,8 @@ mod cfg_pin_tests {
     fn test_clippy_toml_pins_msrv() {
         // PRIMARY LOW-014 PIN for clippy.toml.
         assert!(
-            CLIPPY_TOML.contains("msrv = \"1.85.0\""),
-            "clippy.toml must pin MSRV at 1.85.0 (LOW-014, ESP32 toolchain alignment)"
+            CLIPPY_TOML.contains("msrv = \"1.89.0\""),
+            "clippy.toml must pin MSRV at 1.89.0 (LOW-014, ESP32 toolchain alignment)"
         );
     }
 

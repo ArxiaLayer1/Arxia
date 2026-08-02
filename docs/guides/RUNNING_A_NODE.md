@@ -61,7 +61,7 @@ Light node setup is handled by the Arxia mobile app (planned M12-M18).
 | RAM       | 2 GB                  | 4 GB              |
 | Disk      | 20 GB SSD             | 100 GB SSD        |
 | Network   | 10 Mbps               | 100 Mbps          |
-| Rust      | 1.85.0+               | Latest stable     |
+| Rust      | 1.89.0+               | Latest stable     |
 
 Disk usage grows at approximately 2 GB/year under normal load. Pruned snapshots
 are taken every 100,000 blocks.

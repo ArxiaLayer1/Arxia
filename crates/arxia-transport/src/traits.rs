@@ -141,11 +141,7 @@ impl SignedTransportMessage {
         let max_skew_ms = u64::try_from(max_skew.as_millis()).unwrap_or(u64::MAX);
         self.verify()?;
         let ts = self.message.timestamp;
-        let delta = if ts > now_ms {
-            ts - now_ms
-        } else {
-            now_ms - ts
-        };
+        let delta = ts.abs_diff(now_ms);
         if delta > max_skew_ms {
             return Err(TransportError::TimestampStale {
                 timestamp: ts,

@@ -84,6 +84,9 @@
 //! implemented and measured — the embedded target and a full node
 //! have requirements no single engine satisfies.
 
+#[cfg(feature = "conformance")]
+pub mod conformance;
+
 use arxia_core::ArxiaError;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -464,9 +467,10 @@ impl ConcurrentMemoryStorage {
     /// Store a value under the given key. Atomic w.r.t. every
     /// other call.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
-        let mut guard = self.data.lock().map_err(|e| {
-            ArxiaError::InvalidKey(format!("ConcurrentMemoryStorage poisoned: {e}"))
-        })?;
+        let mut guard = self
+            .data
+            .lock()
+            .map_err(|e| ArxiaError::Storage(format!("ConcurrentMemoryStorage poisoned: {e}")))?;
         guard.insert(key.to_vec(), value.to_vec());
         Ok(())
     }
@@ -475,9 +479,10 @@ impl ConcurrentMemoryStorage {
     /// bytes (so the lock can be released before the caller
     /// reads). Atomic w.r.t. every other call.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError> {
-        let guard = self.data.lock().map_err(|e| {
-            ArxiaError::InvalidKey(format!("ConcurrentMemoryStorage poisoned: {e}"))
-        })?;
+        let guard = self
+            .data
+            .lock()
+            .map_err(|e| ArxiaError::Storage(format!("ConcurrentMemoryStorage poisoned: {e}")))?;
         Ok(guard.get(key).cloned())
     }
 
@@ -485,26 +490,29 @@ impl ConcurrentMemoryStorage {
     /// semantics as [`StorageBackend::delete`] (HIGH-021).
     /// Atomic w.r.t. every other call.
     pub fn delete(&self, key: &[u8]) -> Result<bool, ArxiaError> {
-        let mut guard = self.data.lock().map_err(|e| {
-            ArxiaError::InvalidKey(format!("ConcurrentMemoryStorage poisoned: {e}"))
-        })?;
+        let mut guard = self
+            .data
+            .lock()
+            .map_err(|e| ArxiaError::Storage(format!("ConcurrentMemoryStorage poisoned: {e}")))?;
         Ok(guard.remove(key).is_some())
     }
 
     /// Check if a key exists. Atomic w.r.t. every other call.
     pub fn contains(&self, key: &[u8]) -> Result<bool, ArxiaError> {
-        let guard = self.data.lock().map_err(|e| {
-            ArxiaError::InvalidKey(format!("ConcurrentMemoryStorage poisoned: {e}"))
-        })?;
+        let guard = self
+            .data
+            .lock()
+            .map_err(|e| ArxiaError::Storage(format!("ConcurrentMemoryStorage poisoned: {e}")))?;
         Ok(guard.contains_key(key))
     }
 
     /// Number of keys currently stored. Useful for tests and for
     /// observability of concurrent fill / drain patterns.
     pub fn len(&self) -> Result<usize, ArxiaError> {
-        let guard = self.data.lock().map_err(|e| {
-            ArxiaError::InvalidKey(format!("ConcurrentMemoryStorage poisoned: {e}"))
-        })?;
+        let guard = self
+            .data
+            .lock()
+            .map_err(|e| ArxiaError::Storage(format!("ConcurrentMemoryStorage poisoned: {e}")))?;
         Ok(guard.len())
     }
 
@@ -544,15 +552,14 @@ pub fn wrap_with_checksum(value: &[u8]) -> Vec<u8> {
 /// envelope produced by [`wrap_with_checksum`].
 ///
 /// On success returns the inner value bytes (not the checksum).
-/// Returns `Err(ArxiaError::InvalidKey)` (reused as a typed
-/// "integrity violation" surface) if:
+/// Returns `Err(ArxiaError::Storage)` if:
 /// - The combined bytes are shorter than 32 (no room for the
 ///   checksum prefix).
 /// - The recomputed Blake3 hash of the value bytes does not
 ///   match the stored prefix (corruption or tampering).
 pub fn unwrap_with_checksum(combined: &[u8]) -> Result<Vec<u8>, ArxiaError> {
     if combined.len() < 32 {
-        return Err(ArxiaError::InvalidKey(format!(
+        return Err(ArxiaError::Storage(format!(
             "checksumed value too short: got {} bytes, need >= 32 for prefix",
             combined.len()
         )));
@@ -560,7 +567,7 @@ pub fn unwrap_with_checksum(combined: &[u8]) -> Result<Vec<u8>, ArxiaError> {
     let (prefix, value) = combined.split_at(32);
     let recomputed = arxia_crypto::hash_blake3_bytes(value);
     if prefix != recomputed {
-        return Err(ArxiaError::InvalidKey(
+        return Err(ArxiaError::Storage(
             "checksumed value: Blake3 prefix does not match recomputed hash (corruption or tampering)".to_string(),
         ));
     }
@@ -825,12 +832,12 @@ mod tests {
     #[test]
     fn test_unwrap_rejects_corrupted_value() {
         // Tamper with the value bytes (after the prefix). The
-        // Blake3 recompute must mismatch, raising InvalidKey.
+        // Blake3 recompute must mismatch, raising Storage.
         let value = b"original".to_vec();
         let mut wrapped = wrap_with_checksum(&value);
         wrapped[32] ^= 0xFF; // flip a bit in the value, not the prefix
         let err = unwrap_with_checksum(&wrapped).expect_err("value tampering must be detected");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(err, ArxiaError::Storage(_)));
     }
 
     #[test]
@@ -840,7 +847,7 @@ mod tests {
         let mut wrapped = wrap_with_checksum(&value);
         wrapped[0] ^= 0xFF; // flip a bit in the prefix
         let err = unwrap_with_checksum(&wrapped).expect_err("checksum tampering must be detected");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(err, ArxiaError::Storage(_)));
     }
 
     #[test]
@@ -848,7 +855,7 @@ mod tests {
         // <32 bytes can't even contain the prefix.
         let too_short = vec![0u8; 16];
         let err = unwrap_with_checksum(&too_short).expect_err("short envelope must be rejected");
-        assert!(matches!(err, ArxiaError::InvalidKey(msg) if msg.contains("32")));
+        assert!(matches!(err, ArxiaError::Storage(msg) if msg.contains("32")));
     }
 
     #[test]

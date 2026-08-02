@@ -13,3 +13,6 @@ Thumbs.db
 .env.local
 lcov.info
 *.profraw
+
+# Local baseline build output used during verification runs.
+target-baseline/

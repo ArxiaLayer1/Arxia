@@ -97,6 +97,13 @@ pub enum ArxiaError {
     #[error("invalid key: {0}")]
     InvalidKey(String),
 
+    /// A storage backend failed: an I/O error, a corrupted database,
+    /// or a poisoned lock. Introduced with the first persistent
+    /// backend — before that, storage faults had no variant of their
+    /// own and were shoehorned into [`ArxiaError::InvalidKey`].
+    #[error("storage backend error: {0}")]
+    Storage(String),
+
     /// Attempt to Open an account that already has blocks in its chain.
     #[error("account already open: chain is not empty")]
     AccountAlreadyOpen,

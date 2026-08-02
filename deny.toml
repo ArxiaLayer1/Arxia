@@ -65,6 +65,20 @@ version = "<0.8.0"
 name = "zerocopy"
 version = ">=0.9.0"
 
+# redb : accepted-risk envelope is exactly the 4.1.x line. Two
+# upstream crash windows around file growth exist in 4.1.0 and
+# are fixed in the unreleased 4.2.0 ; see docs/dependency-risks.md
+# "redb crash windows during file growth" for the rationale and
+# the exit plan. A 4.2 release must come through deliberate
+# review, not a silent bump.
+[[bans.deny]]
+name = "redb"
+version = "<4.1.0"
+
+[[bans.deny]]
+name = "redb"
+version = ">=4.2.0"
+
 [sources]
 # Reject unknown registries and unknown git remotes.
 unknown-registry = "deny"

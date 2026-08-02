@@ -32,7 +32,7 @@ jobs:
       # cargo-audit raised its own MSRV to 1.88, `cargo install` resolved
       # to a release the 1.85 toolchain could not build and the job broke
       # on every PR and on main. MSRV is still enforced where it matters,
-      # by the 1.85.0 build/test/clippy jobs in ci.yml.
+      # by the MSRV-pinned build/test/clippy jobs in ci.yml.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # `rust-toolchain.toml` pins the repo to the MSRV, and rustup
