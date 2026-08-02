@@ -1,0 +1,190 @@
+# Flash endurance model — T-Beam ledger storage
+
+> **Status: theoretical model, written before the hardware bench.**
+> Nothing in this document is implemented. `arxia-storage-flash` does
+> not exist yet; the ESP32 target has no persistence. This model exists
+> so that when the M3-6 bench runs, every observed number lands against
+> a written prediction — if the field diverges from the model, we want
+> to know immediately whether it is the model or the material that is
+> wrong, not discover we never wrote the prediction down.
+
+Every number below is tagged:
+
+- **[datasheet]** — vendor specification
+- **[measured]** — measured in this repository, command recorded
+- **[derived]** — computed from tagged numbers, formula shown
+- **[assumed]** — a choice or estimate the bench must confirm
+
+## 1. Hardware ground truth
+
+Target device: LilyGO TTGO T-Beam v1.1 (ESP32-DOWDQ6, SX1276 LoRa,
+GPS) — the reference node of `docs/guides/HARDWARE_SETUP.md`.
+
+| Parameter | Value | Tag |
+|---|---|---|
+| SPI NOR flash size | 4 MiB | [datasheet] |
+| Erase sector | 4 KiB (1,024 sectors) | [datasheet] |
+| Program page | 256 B | [datasheet] |
+| Endurance | 100,000 P/E cycles min, per sector | [datasheet] |
+| Data retention | 20 years | [datasheet] |
+| Flash part | W25Q32JV-class | [assumed — read the marking off the bench unit; Winbond W25Q32JV and GigaDevice GD25Q32 both appear on v1.1 boards and both specify 100K cycles] |
+
+Source: Winbond W25Q32JV datasheet (RevJ, 2024-12-24). NOR flash
+erases to `0xFF` in 4 KiB units and programs in up to 256 B pages;
+endurance is consumed by **erases**, so the whole model below reduces
+to one question: *how many sector-erases per day does a transfer
+workload cause?*
+
+## 2. Write pattern per transfer
+
+A transfer on the block-lattice is two blocks plus index maintenance.
+From the ledger ingest path (`Ledger::add_block`):
+
+| Item written | Size | Tag |
+|---|---|---|
+| SEND block, serialized | 193 B | [measured — protocol constant, `arxia-lattice` serialization] |
+| RECEIVE block, serialized | 193 B | [measured — same] |
+| `send_index` entry (add on SEND) | ~80 B | [derived — 64-hex-char hash key + destination + amount] |
+| `send_index` tombstone + `consumed_sends` entry (on RECEIVE) | ~100 B | [derived] |
+| Per-item storage overhead, 4 items | ~64 B | [assumed — sequential-storage item header + CRCs + word alignment, ~16 B/item; measure on bench] |
+
+**Model constant: ~600 B of flash appends per completed transfer**
+[derived]. Cross-check: the in-memory ledger retains 1,544 B per
+transfer [measured — heap retention per completed transfer, HashMap
+and String overhead included]; the ~2.5x gap is
+`HashMap`/`String` overhead that serialized storage does not pay, so
+600 B is consistent rather than optimistic.
+
+An `Open` adds one 193 B block and a supply-accumulator update;
+opens are rare relative to transfers and are ignored below (they only
+make the numbers better).
+
+## 3. Storage layout assumption
+
+Two regions, because the two halves of ledger state have opposite
+write behaviour:
+
+- **Chain region** — blocks. Append-only: a block, once accepted, is
+  never modified (only L2-finality pruning, planned, ever removes
+  data). Modelled
+  as a sequential log.
+- **Hot region** — mutable state: `send_index` entries and
+  tombstones, the supply accumulator, mount metadata. Small, rewritten
+  constantly. Modelled as a key-value map over a few sectors.
+
+This split is load-bearing. A single map holding everything would be
+pathological for append-only data: sequential-storage's map reclaims
+space by migrating every still-live item off a page before erasing it
+(`map.rs`, `migrate_items`), so chain data — which never dies — would
+be recopied on every wrap, and the copy cost would grow with chain
+length. Append-only data goes in an append-only structure; the map
+gets only the data that actually dies.
+
+Region budget on the 4 MiB part [assumed — firmware image size to be
+confirmed once `arxia-esp32` links against the storage stack]:
+
+| Region | Size | Sectors |
+|---|---|---|
+| Firmware + headroom | ~1.75 MiB | — |
+| Chain region | 2 MiB | 512 |
+| Hot region | 64 KiB | 16 |
+| Reserve (mount meta, scratch) | rest | — |
+
+## 4. The wear model
+
+sequential-storage advances through its flash range page by page and
+erases each page exactly once per wrap — wear is uniform across the
+region *by construction*, no wear-levelling table needed. So per-sector
+cycles = region wraps.
+
+For a log-structured region reclaimed by migrating live data (the map,
+or the chain region once L2-finality pruning compacts it), the classic
+write-amplification result applies:
+
+```
+WA = 1 / (1 - u)        u = live bytes / region bytes
+```
+
+Each wrap rewrites the live fraction `u` ahead of the erase, so raw
+appends of `B` bytes/day cause `B x WA` bytes/day of physical writes:
+
+```
+sector_erases_per_day   = (B x WA) / 4096
+cycles_per_sector_year  = 365 x sector_erases_per_day / sectors_in_region
+lifetime_years          = 100,000 / cycles_per_sector_year
+```
+
+## 5. Predictions
+
+Workloads [assumed — LoRa airtime caps a T-Beam mesh node well below
+the top row; 10,000/day is a deliberate absurdity to bracket the
+model]:
+
+**Chain region, 2 MiB, 600 B/transfer:**
+
+| Transfers/day | u (post-pruning) | WA | Erases/day | Lifetime |
+|---|---|---|---|---|
+| 100 | 0.5 | 2 | 29 | ~4,800 years |
+| 1,000 | 0.5 | 2 | 293 | ~480 years |
+| 1,000 | 0.9 | 10 | 1,465 | ~96 years |
+| 10,000 | 0.9 | 10 | 14,650 | ~9.6 years |
+
+**Hot region, 64 KiB, ~150 B/transfer of map traffic** (2 items),
+live set a few KiB so WA ~= 1:
+
+| Transfers/day | Wraps/day | Lifetime |
+|---|---|---|
+| 100 | 0.23 | ~1,200 years |
+| 1,000 | 2.3 | ~120 years |
+| 10,000 | 23 | ~12 years |
+
+**Conclusion of the model: endurance is not the binding constraint at
+any plausible testnet rate.** The binding constraint is **capacity**:
+2 MiB / 600 B ~= 3,500 transfers before the chain region is full and
+pruning must run — consistent with the earlier projection of
+~2,400-7,100 transfers for the whole device [derived — same per-
+transfer constants against candidate region sizes]. Pruning cadence, not wear, is what the storage
+roadmap has to engineer for. Wear only becomes a design input if the
+bench falsifies the model.
+
+Secondary prediction worth pinning: at 1,000 transfers/day the model
+says under ~3 sector-erases/day/sector-of-hot-region and ~300 erases/
+day total. These are countable events.
+
+## 6. What the bench must measure (M3-6)
+
+Each line falsifies a tagged assumption above:
+
+1. **Bytes appended per transfer** — instrument the flash driver;
+   compare against the 600 B model constant (A: [derived] sizes,
+   [assumed] overhead).
+2. **Per-item overhead** — the real sequential-storage item cost on
+   ESP32 word size, vs the assumed ~16 B.
+3. **Sector-erase counter** — wrap the `NorFlash` implementation in a
+   counting adapter and log erases per region per day. Compare against
+   the table in section 5. **Divergence beyond 2x in either direction
+   stops the test until attributed** — model error and hardware error
+   have different fixes, and calibrating silently would defeat the
+   purpose of having predictions.
+4. **Flash part marking** — replace the [assumed] part-class row with
+   the real chip and its datasheet.
+5. **Power-loss durability** — pull the plug mid-batch, repeatedly.
+   This is the layer no process-kill test can reach (see
+   `arxia-storage-redb`'s documented limit: kill -9 proves
+   crash-atomicity and process-death durability, not power-loss). The
+   flash backend inherits the same `StorageBackend` atomicity
+   contract, and the plug-pull is its kill-nine.
+
+## 7. Design requirement carried forward to `arxia-storage-flash`
+
+sequential-storage is power-fail safe **per item** (CRC-protected,
+recoverable). The `StorageBackend` contract requires atomicity **per
+batch** — a torn `add_block` batch is exactly the corruption the trait
+documentation forbids (a `send_index` entry whose block was never
+written is spendable value no chain records). The flash backend will
+therefore need a batch seal on top of per-item safety: a commit-marker
+item written last, with mount-time recovery ignoring any items past
+the last seal — the same "the marker and the data are one statement"
+construction the redb kill-nine test uses. That design belongs to the
+`arxia-storage-flash` step and is recorded here only so the
+requirement is not rediscovered late.
