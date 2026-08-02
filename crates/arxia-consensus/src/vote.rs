@@ -83,7 +83,7 @@ pub fn verify_vote(vote: &VoteORV) -> Result<(), ArxiaError> {
 /// local `known_blocks` set. If either check fails, the vote is
 /// rejected with a typed error:
 ///
-/// - `Err(ArxiaError::SignatureInvalid(_))` — signature mismatch.
+/// - `Err(ArxiaError::SignatureInvalid { .. })` — signature mismatch.
 ///   Returned first for cheap rejection.
 /// - `Err(ArxiaError::UnknownVoteTarget { block_hash })` — signature
 ///   ok but the targeted block is not in `known_blocks`. This pins
@@ -216,7 +216,7 @@ mod tests {
         known.insert(tampered);
         let err = verify_vote_known(&vote, &known).expect_err("tampered signature must reject");
         match err {
-            ArxiaError::SignatureInvalid(_) => {} // expected
+            ArxiaError::SignatureInvalid { .. } => {} // expected
             ArxiaError::UnknownVoteTarget { .. } => {
                 panic!("inclusion check must not run before signature check");
             }

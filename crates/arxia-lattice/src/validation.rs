@@ -12,7 +12,7 @@
 //! documented at the `arxia_crypto::ed25519` module level.
 
 use crate::block::{Block, BlockType};
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, GenesisRule, SignatureFault};
 
 /// Verify a single block hash and Ed25519 signature.
 pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
@@ -35,13 +35,19 @@ pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
     // any signature work. This is the parse-side mirror of the
     // strict verify below.
     arxia_crypto::validate_pubkey_strict(&pubkey_bytes)?;
-    let sig_bytes: [u8; 64] = block
-        .signature
-        .as_slice()
-        .try_into()
-        .map_err(|_| ArxiaError::SignatureInvalid("bad sig length".into()))?;
-    let hash_bytes =
-        hex::decode(&block.hash).map_err(|e| ArxiaError::SignatureInvalid(e.to_string()))?;
+    let sig_bytes: [u8; 64] =
+        block
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| ArxiaError::SignatureInvalid {
+                fault: SignatureFault::Length {
+                    got: block.signature.len(),
+                },
+            })?;
+    let hash_bytes = hex::decode(&block.hash).map_err(|_| ArxiaError::SignatureInvalid {
+        fault: SignatureFault::HashEncoding,
+    })?;
     // Route through arxia_crypto::verify, which calls dalek's
     // `verify_strict` (canonical-S enforcement + low-order
     // rejection at the equation level).
@@ -55,20 +61,21 @@ pub fn verify_chain_integrity(chain: &[Block]) -> Result<(), ArxiaError> {
         return Ok(());
     }
     if chain[0].nonce != 1 {
-        return Err(ArxiaError::InvalidGenesis(format!(
-            "nonce must be 1, got {}",
-            chain[0].nonce
-        )));
+        return Err(ArxiaError::InvalidGenesis {
+            rule: GenesisRule::NonceMustBeOne {
+                got: chain[0].nonce,
+            },
+        });
     }
     if !matches!(chain[0].block_type, BlockType::Open { .. }) {
-        return Err(ArxiaError::InvalidGenesis(
-            "first block must be OPEN".into(),
-        ));
+        return Err(ArxiaError::InvalidGenesis {
+            rule: GenesisRule::FirstBlockMustBeOpen,
+        });
     }
     if !chain[0].previous.is_empty() {
-        return Err(ArxiaError::InvalidGenesis(
-            "genesis must have empty previous".into(),
-        ));
+        return Err(ArxiaError::InvalidGenesis {
+            rule: GenesisRule::PreviousMustBeEmpty,
+        });
     }
     verify_block(&chain[0])?;
     for i in 1..chain.len() {
@@ -340,5 +347,105 @@ mod tests {
              the verify boundary (got {:?})",
             result
         );
+    }
+
+    /// R3 of the typed-error rework: three different genesis
+    /// violations must surface as three distinct `GenesisRule`
+    /// discriminants. A change that merges two rules into one — or
+    /// flattens them back into prose — fails one of these asserts;
+    /// that falsifiability is the point, because downstream peer
+    /// scoring will route on the discriminant.
+    ///
+    /// Field tampering is deliberate and sufficient here: the genesis
+    /// rules fire before any signature check, which is itself part of
+    /// the contract (a malformed genesis is reported as such, not as
+    /// a signature failure).
+    #[test]
+    fn each_genesis_violation_has_its_own_discriminant() {
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        let send = alice.send(bob.id(), 1_000, &mut vc).unwrap();
+
+        // Cause 1: first block's nonce is not 1.
+        let mut tampered = alice.chain.clone();
+        tampered[0].nonce = 2;
+        assert!(matches!(
+            verify_chain_integrity(&tampered),
+            Err(ArxiaError::InvalidGenesis {
+                rule: GenesisRule::NonceMustBeOne { got: 2 }
+            })
+        ));
+
+        // Cause 2: first block is a Send (nonce forced to 1 so the
+        // nonce rule cannot mask the type rule).
+        let mut not_open = send.clone();
+        not_open.nonce = 1;
+        assert!(matches!(
+            verify_chain_integrity(&[not_open]),
+            Err(ArxiaError::InvalidGenesis {
+                rule: GenesisRule::FirstBlockMustBeOpen
+            })
+        ));
+
+        // Cause 3: genesis with a non-empty previous.
+        let mut bad_prev = alice.chain[0].clone();
+        bad_prev.previous = "deadbeef".to_string();
+        assert!(matches!(
+            verify_chain_integrity(&[bad_prev]),
+            Err(ArxiaError::InvalidGenesis {
+                rule: GenesisRule::PreviousMustBeEmpty
+            })
+        ));
+    }
+
+    /// R3 of the typed-error rework, signature family: a structural
+    /// failure (wrong length, unparseable hash) and the cryptographic
+    /// failure (equation does not hold) are different adversarial
+    /// signals, and each must surface under its own discriminant.
+    /// A change collapsing them fails one of these asserts.
+    #[test]
+    fn each_signature_failure_has_its_own_discriminant() {
+        let mut vc = VectorClock::new();
+        let mut chain = AccountChain::new();
+        chain.open(1_000_000, &mut vc).unwrap();
+
+        // Cause 1: signature of the wrong length — structurally
+        // malformed, never reaches the verify equation.
+        let mut short_sig = chain.chain[0].clone();
+        short_sig.signature = vec![0xAA; 63];
+        assert!(matches!(
+            verify_block(&short_sig),
+            Err(ArxiaError::SignatureInvalid {
+                fault: SignatureFault::Length { got: 63 }
+            })
+        ));
+
+        // A tampered hash cannot reach the HashEncoding path: the
+        // recompute-and-compare fires first, and the recomputed hash
+        // is always valid hex, so a block that passes the mismatch
+        // check has a decodable hash by construction. HashEncoding is
+        // therefore defense-in-depth on the decode that follows —
+        // asserted here so the day the check order changes, this
+        // stops being true loudly rather than silently.
+        let mut bad_hash = chain.chain[0].clone();
+        bad_hash.hash = "zzzz-not-hex".to_string();
+        assert!(matches!(
+            verify_block(&bad_hash),
+            Err(ArxiaError::HashMismatch)
+        ));
+
+        // Cause 3: well-formed 64-byte signature that simply does not
+        // verify — the cryptographic failure.
+        let mut forged = chain.chain[0].clone();
+        forged.signature = vec![0x01; 64];
+        assert!(matches!(
+            verify_block(&forged),
+            Err(ArxiaError::SignatureInvalid {
+                fault: SignatureFault::Verification
+            })
+        ));
     }
 }

@@ -165,8 +165,8 @@ mod tests {
     /// characters are `//` (line comment, doc comment, inner
     /// doc comment). Returns the first offending line if any.
     fn scan_production_for(pattern: &str) -> Option<(usize, String)> {
-        // Split on the bare `#[cfg(test)]` attribute. PHASE2-001
-        // fix: the prior 2-line marker `"#[cfg(test)]\nmod tests"`
+        // Split on the bare `#[cfg(test)]` attribute. A
+        // 2-line marker like `"#[cfg(test)]\nmod tests"`
         // depended on LF line endings, which broke on Windows
         // fresh clones with default `core.autocrlf=true` (CRLF
         // checkout). Using the bare attribute is CRLF-tolerant
@@ -221,8 +221,9 @@ mod tests {
     /// return type) fails this test.
     #[test]
     fn test_main_source_returns_result() {
-        // PHASE2-001 fix: same CRLF-tolerant split rationale as
-        // `scan_production_for`. Pre-fix, on Windows fresh-clone
+        // Same CRLF-tolerant split rationale as
+        // `scan_production_for`. With a literal-LF marker, on a
+        // Windows fresh-clone
         // with default `core.autocrlf=true`, the literal-LF
         // marker did not match, the entire file was returned as
         // one segment, and the `contains` assertion passed by

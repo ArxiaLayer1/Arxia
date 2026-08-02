@@ -1,4 +1,26 @@
 //! Unified error type for the Arxia protocol.
+//!
+//! # Errors are data, not text
+//!
+//! Variants carry typed fields — discriminant enums, counts, the
+//! actual nonce or byte length — so that consumers route on data
+//! rather than parse messages. The first consumer this serves is
+//! relay slashing: deciding how to treat a peer requires knowing
+//! *which* rule was broken (a stale timestamp is a replay signal, a
+//! bad signature is an impersonation signal, a non-Open genesis is an
+//! attempted mint), and that distinction must survive any rewording
+//! of a human-facing message. `Display` still renders an operator-
+//! readable sentence for every variant; the sentence is derived from
+//! the fields, never the other way around.
+//!
+//! Consequences for contributors:
+//!
+//! - Adding a failure mode means adding a variant or a discriminant,
+//!   not formatting a new message into an existing `String`.
+//! - Two different causes must never map to the same variant with
+//!   the same fields — if code can tell them apart, the error must.
+//!   Each discriminant family has a test asserting exactly that, and
+//!   those tests are mutation-verified.
 
 use thiserror::Error;
 
@@ -22,9 +44,14 @@ pub enum ArxiaError {
     #[error("hash mismatch")]
     HashMismatch,
 
-    /// Ed25519 signature verification failed.
-    #[error("signature verification failed: {0}")]
-    SignatureInvalid(String),
+    /// Ed25519 signature verification failed, structurally or
+    /// cryptographically. The fault says which — the two are
+    /// different adversarial signals and must stay routable.
+    #[error("signature invalid: {fault}")]
+    SignatureInvalid {
+        /// What exactly failed.
+        fault: SignatureFault,
+    },
 
     /// Insufficient balance for the operation.
     #[error("insufficient balance: {available} < {required}")]
@@ -54,9 +81,16 @@ pub enum ArxiaError {
     #[error("hash chain broken at block {0}")]
     HashChainBroken(usize),
 
-    /// Genesis block validation error.
-    #[error("invalid genesis block: {0}")]
-    InvalidGenesis(String),
+    /// The first block of an account chain violates a genesis rule.
+    ///
+    /// Carries the violated rule as a typed discriminant rather than
+    /// prose, so a consumer (finality scoring, relay slashing) can
+    /// route on *which* rule was broken instead of parsing a message.
+    #[error("invalid genesis block: {rule}")]
+    InvalidGenesis {
+        /// The specific rule the block broke.
+        rule: GenesisRule,
+    },
 
     /// SEND block destination mismatch.
     #[error("SEND block not addressed to this account")]
@@ -73,9 +107,14 @@ pub enum ArxiaError {
         nonce: u64,
     },
 
-    /// Transport-level error.
-    #[error("transport error: {0}")]
-    Transport(String),
+    /// Transport-level fault, with the transport crate's own typed
+    /// error mirrored across the crate boundary so its payloads
+    /// survive the conversion instead of being flattened to prose.
+    #[error("transport error: {fault}")]
+    Transport {
+        /// The specific transport fault.
+        fault: TransportFault,
+    },
 
     /// Sync timed out.
     #[error("sync timeout")]
@@ -89,9 +128,12 @@ pub enum ArxiaError {
     #[error("hex decode error: {0}")]
     HexDecode(#[from] hex::FromHexError),
 
-    /// Serialization error.
-    #[error("serialization error: {0}")]
-    Serialization(String),
+    /// A protocol item failed to serialize.
+    #[error("serialization failed for {item}")]
+    Serialization {
+        /// Which item was being serialized.
+        item: SerializedItem,
+    },
 
     /// Invalid cryptographic key.
     #[error("invalid key: {0}")]
@@ -238,4 +280,178 @@ pub enum ArxiaError {
         /// Hex-encoded `source_hash` from the `Receive` block.
         source_hash: String,
     },
+}
+
+/// The specific genesis rule an [`ArxiaError::InvalidGenesis`] reports.
+///
+/// A typed discriminant, not prose: two different violations must stay
+/// distinguishable by code, because a consumer deciding how to treat a
+/// peer (mere malformation vs. an attempted second mint) needs the
+/// *which*, not a message to parse. `Display` still renders an
+/// operator-readable sentence for logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GenesisRule {
+    /// The first block's nonce must be exactly 1.
+    #[error("nonce must be 1, got {got}")]
+    NonceMustBeOne {
+        /// The nonce the block actually declared.
+        got: u64,
+    },
+    /// The first block of a chain must be an `Open`.
+    #[error("first block must be OPEN")]
+    FirstBlockMustBeOpen,
+    /// A genesis block has no predecessor, so its `previous` field
+    /// must be empty.
+    #[error("genesis must have empty previous, got a non-empty hash")]
+    PreviousMustBeEmpty,
+}
+
+/// The specific fault behind an [`ArxiaError::SignatureInvalid`].
+///
+/// `Verification` is the cryptographic failure: well-formed inputs,
+/// equation does not hold (dalek `verify_strict`, canonical-S and
+/// low-order rejection included). The other two are structural: the
+/// bytes never reached the equation. A peer submitting well-formed
+/// blocks that fail verification looks like tampering or key
+/// confusion; a peer submitting structurally malformed blocks looks
+/// like a broken or hostile serializer. Scoring may weigh them
+/// differently, so the discriminant keeps them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SignatureFault {
+    /// The Ed25519 equation did not verify under the account key.
+    #[error("the signature does not verify under the account key")]
+    Verification,
+    /// The signature is not exactly 64 bytes.
+    #[error("expected a 64-byte signature, got {got} bytes")]
+    Length {
+        /// The length actually supplied.
+        got: usize,
+    },
+    /// The block's hash field is not valid hex, so there was nothing
+    /// well-formed to verify against.
+    ///
+    /// Defense-in-depth: on the current verify path this cannot fire,
+    /// because the recompute-and-compare check runs first and the
+    /// recomputed hash is always valid hex. It exists so the decode
+    /// that follows maps to a typed fault instead of a panic path,
+    /// and so a future reordering of the checks fails loudly into a
+    /// meaningful variant.
+    #[error("the block hash field is not valid hex")]
+    HashEncoding,
+}
+
+/// The specific fault behind an [`ArxiaError::Transport`].
+///
+/// Mirrors the transport crate's own error type field-for-field; the
+/// `From` conversion over there is an exhaustive match, so adding a
+/// transport error variant without mapping it here is a compile
+/// error, not a silent flattening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TransportFault {
+    /// Message exceeds the MTU for this transport.
+    #[error("payload too large: {size} > {max}")]
+    PayloadTooLarge {
+        /// Size of the payload.
+        size: usize,
+        /// Maximum allowed size.
+        max: usize,
+    },
+    /// The transport channel is disconnected.
+    #[error("transport disconnected")]
+    Disconnected,
+    /// The message was lost in transit.
+    #[error("message lost")]
+    MessageLost,
+    /// The send-side outbox is at capacity; the caller must drain
+    /// before retrying.
+    #[error("transport outbox full (capacity {capacity})")]
+    BackPressure {
+        /// Configured outbox capacity, in messages.
+        capacity: usize,
+    },
+    /// The message's `from` field is not a 64-char hex pubkey.
+    #[error("transport message `from` is not a 64-char hex 32-byte pubkey")]
+    InvalidFromField,
+    /// The message signature does not verify under `from`.
+    #[error("transport message signature does not verify under `from`")]
+    SignatureInvalid,
+    /// The message timestamp falls outside the freshness window.
+    #[error(
+        "message timestamp {timestamp} outside freshness window (now {now}, max skew {max_skew} ms)"
+    )]
+    TimestampStale {
+        /// Message timestamp, ms since epoch.
+        timestamp: u64,
+        /// Verifier clock, ms since epoch.
+        now: u64,
+        /// Accepted deviation either side, ms.
+        max_skew: u64,
+    },
+}
+
+/// Which protocol item an [`ArxiaError::Serialization`] was
+/// serializing when it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SerializedItem {
+    /// The `BlockType` payload of a block being hashed.
+    #[error("block type")]
+    BlockType,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2 of the typed-error rework: `Display` must stay operator-
+    /// readable. Each rule renders a sentence carrying its payload,
+    /// not a bare variant name.
+    /// R2 for the signature family.
+    #[test]
+    fn signature_fault_display_is_operator_readable() {
+        let l = ArxiaError::SignatureInvalid {
+            fault: SignatureFault::Length { got: 63 },
+        };
+        let msg = l.to_string();
+        assert!(
+            msg.contains("signature invalid") && msg.contains("got 63 bytes"),
+            "wrapper must carry family and payload: {msg}"
+        );
+        let v = SignatureFault::Verification.to_string();
+        assert!(v.contains("does not verify"));
+        let h = SignatureFault::HashEncoding.to_string();
+        assert!(h.contains("hex"));
+    }
+
+    /// R2 for the transport and serialization families.
+    #[test]
+    fn transport_and_serialization_display_are_operator_readable() {
+        let f = TransportFault::BackPressure { capacity: 128 };
+        assert_eq!(f.to_string(), "transport outbox full (capacity 128)");
+        let wrapped = ArxiaError::Transport { fault: f };
+        assert!(wrapped.to_string().starts_with("transport error:"));
+
+        let s = ArxiaError::Serialization {
+            item: SerializedItem::BlockType,
+        };
+        assert_eq!(s.to_string(), "serialization failed for block type");
+    }
+
+    #[test]
+    fn genesis_rule_display_is_operator_readable() {
+        let nonce = GenesisRule::NonceMustBeOne { got: 7 };
+        let open = GenesisRule::FirstBlockMustBeOpen;
+        let prev = GenesisRule::PreviousMustBeEmpty;
+
+        assert_eq!(nonce.to_string(), "nonce must be 1, got 7");
+        assert!(open.to_string().contains("OPEN"));
+        assert!(prev.to_string().contains("previous"));
+
+        // The wrapper composes the rule into its own message.
+        let wrapped = ArxiaError::InvalidGenesis { rule: nonce };
+        let msg = wrapped.to_string();
+        assert!(
+            msg.contains("invalid genesis block") && msg.contains("got 7"),
+            "wrapper must carry both the family and the payload: {msg}"
+        );
+    }
 }

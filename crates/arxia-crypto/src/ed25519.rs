@@ -51,7 +51,7 @@ use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::SysRng;
 
-use arxia_core::{AccountId, ArxiaError, SignatureBytes};
+use arxia_core::{AccountId, ArxiaError, SignatureBytes, SignatureFault};
 
 /// Generate a new Ed25519 keypair.
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
@@ -90,7 +90,9 @@ pub fn verify(
     let vk = VerifyingKey::from_bytes(pubkey).map_err(|e| ArxiaError::InvalidKey(e.to_string()))?;
     let sig = Signature::from_bytes(signature);
     vk.verify_strict(data, &sig)
-        .map_err(|e| ArxiaError::SignatureInvalid(e.to_string()))
+        .map_err(|_| ArxiaError::SignatureInvalid {
+            fault: SignatureFault::Verification,
+        })
 }
 
 /// Strict parse-time validation of a 32-byte Ed25519 public key.

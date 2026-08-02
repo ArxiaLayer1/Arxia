@@ -70,7 +70,7 @@
 
 use crate::block::{Block, BlockType};
 use crate::validation::verify_block;
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, GenesisRule};
 use std::collections::{HashMap, HashSet};
 
 /// Compact summary of an accepted `Send` block, kept in
@@ -78,10 +78,11 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone)]
 struct SendInfo {
     destination: String,
-    /// Reserved for the supply-accumulator follow-up (PHASE2-013-B).
-    /// Kept here so the index has the data already at hand when the
-    /// global cap check lands.
-    #[allow(dead_code)]
+    /// Amount of the `Send`, as recorded at its own ingestion. This is
+    /// the source of authority for the credit of the `Receive` that
+    /// later cites this block: the conservation check derives the
+    /// expected post-balance from it, never from what the `Receive`
+    /// declares about itself.
     amount: u64,
 }
 
@@ -248,14 +249,14 @@ impl Ledger {
                 });
             }
             if !matches!(block.block_type, BlockType::Open { .. }) {
-                return Err(ArxiaError::InvalidGenesis(
-                    "first block must be OPEN".into(),
-                ));
+                return Err(ArxiaError::InvalidGenesis {
+                    rule: GenesisRule::FirstBlockMustBeOpen,
+                });
             }
             if !block.previous.is_empty() {
-                return Err(ArxiaError::InvalidGenesis(
-                    "genesis must have empty previous".into(),
-                ));
+                return Err(ArxiaError::InvalidGenesis {
+                    rule: GenesisRule::PreviousMustBeEmpty,
+                });
             }
         }
 
@@ -413,7 +414,7 @@ mod tests {
         block.signature[0] ^= 0xFF;
         let result = ledger.add_block(block);
         assert!(
-            matches!(result, Err(ArxiaError::SignatureInvalid(_))),
+            matches!(result, Err(ArxiaError::SignatureInvalid { .. })),
             "expected SignatureInvalid, got {:?}",
             result
         );
@@ -436,7 +437,7 @@ mod tests {
             matches!(
                 result,
                 Err(ArxiaError::HashMismatch)
-                    | Err(ArxiaError::SignatureInvalid(_))
+                    | Err(ArxiaError::SignatureInvalid { .. })
                     | Err(ArxiaError::InvalidKey(_))
             ),
             "expected verification failure, got {:?}",
@@ -453,7 +454,7 @@ mod tests {
         let mut block = alice.open(1_000_000, &mut vc).unwrap();
         block.signature = vec![0u8; 64];
         let result = ledger.add_block(block);
-        assert!(matches!(result, Err(ArxiaError::SignatureInvalid(_))));
+        assert!(matches!(result, Err(ArxiaError::SignatureInvalid { .. })));
         assert!(ledger.get_chain(alice.id()).is_none());
     }
 
@@ -663,7 +664,7 @@ mod tests {
         );
         let result = ledger.add_block(forged_send_genesis);
         assert!(
-            matches!(result, Err(ArxiaError::InvalidGenesis(_))),
+            matches!(result, Err(ArxiaError::InvalidGenesis { .. })),
             "expected InvalidGenesis (variant check), got {:?}",
             result
         );
