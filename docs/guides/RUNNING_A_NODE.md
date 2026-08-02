@@ -102,7 +102,7 @@ Build time: approximately 3-5 minutes on a modern machine.
 This generates:
 - Ed25519 keypair for the node identity
 - Default configuration file at `~/.arxia/config.toml`
-- Empty RocksDB storage at `~/.arxia/db/`
+- An empty data directory at `~/.arxia/db/`
 
 ### 4. Start the node
 
@@ -252,29 +252,54 @@ arxia-node relay receipts       # view pending receipt batches
 
 ## Storage
 
-Arxia uses RocksDB for block storage:
+> **Status: not yet implemented.** The node binary is a stub (see the
+> banner at the top of this guide), and no persistent storage backend
+> ships today. Everything in this section describes the intended
+> design, not current behaviour. It is written down so the interface
+> is agreed before it is built — treat it as a contract for future
+> work, not as instructions you can follow now.
 
-```
-~/.arxia/db/
-├── blocks/       # Raw block data, indexed by hash
-├── chains/       # Per-account chain index
-├── nonces/       # Nonce registry (double-spend prevention)
-├── did/          # Cached DID documents
-└── snapshots/    # State snapshots every 100k blocks
-```
+### What exists today
 
-```bash
-arxia-node storage stats             # check usage
-arxia-node storage prune             # prune beyond snapshot horizon
-```
+`arxia-storage` defines a `StorageBackend` trait — a byte-keyed
+key/value interface (`put` / `get` / `delete` / `contains`) with a
+transaction API (`begin_transaction` / `commit` / `rollback`) and
+checksum-wrapping helpers for stored values.
 
-IPFS archival (optional):
+The only implementations are in-memory: `MemoryStorage` and a
+thread-safe `ConcurrentMemoryStorage`. They are used by the test
+suite. A running node therefore holds all state in RAM and loses it
+on restart.
 
-```toml
-[storage.archive]
-ipfs_enabled = true
-ipfs_api = "http://127.0.0.1:5001"
-```
+### What is being built
+
+A persistent backend behind that same trait. Two constraints shape
+the work, and they do not admit a single engine:
+
+- **Full nodes** (Linux x86_64 / ARM) need multi-key atomic commit:
+  applying a block updates the chain, the send index, the consumed-
+  source set and the supply accumulator, and a half-applied block
+  must never be observable.
+- **Light nodes** (ESP32 T-Beam) have roughly 520 KB of SRAM and a
+  4 MB SPI flash. That rules out server-class embedded databases
+  outright, so the device side needs a flash-aware, allocation-free
+  design with wear levelling and power-loss recovery.
+
+The trait also needs an ordered-iteration primitive before either
+backend can be written: reading an account chain and verifying its
+integrity both require prefix scans, which the current interface
+does not offer.
+
+Specific backend choices are not published here until they are
+implemented and measured. Replacing one inaccurate description
+with another would defeat the purpose of this correction.
+
+### Capacity, measured
+
+With state held in RAM, a light node saturates at roughly 336
+transfers (~1.5 KB retained per transfer, no pruning). Moving to
+flash is what lifts that ceiling; the figure will be restated here
+once it is measured on hardware rather than derived.
 
 ---
 
@@ -338,11 +363,9 @@ Check that the T-Beam is powered and running Meshtastic firmware. Verify the
 serial port path with `ls /dev/ttyUSB*` on Linux.
 
 **High memory usage**
-Reduce the RocksDB cache:
-```toml
-[storage]
-rocksdb_cache_mb = 256   # default 512
-```
+Expected: all state is currently held in RAM, and nothing is pruned.
+A long-running node grows without bound. There is no cache setting to
+reduce — persistent storage is the fix, and it is not shipped yet.
 
 **Relay score dropping**
 Check for sustained network interruptions. The 30-day window absorbs brief

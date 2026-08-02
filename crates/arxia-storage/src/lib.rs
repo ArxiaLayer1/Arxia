@@ -77,10 +77,12 @@
 //! `begin → put each → commit` for the common case where a caller
 //! has a slice of `(key, value)` pairs to land together.
 //!
-//! For a future on-disk backend (sled / rocksdb / WAL), the same
-//! `Transaction` shape applies ; the staging buffer becomes the
-//! WAL frame, and `commit` becomes "fsync the WAL frame, then
-//! apply".
+//! The same `Transaction` shape is intended to carry over to a
+//! persistent backend: the staging buffer becomes the durable frame,
+//! and `commit` becomes "make the frame durable, then apply". No
+//! such backend ships yet, and no engine is named here until one is
+//! implemented and measured — the embedded target and a full node
+//! have requirements no single engine satisfies.
 
 use arxia_core::ArxiaError;
 use std::collections::HashMap;
