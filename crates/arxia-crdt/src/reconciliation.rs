@@ -155,6 +155,11 @@ pub fn reconcile_partitions(
     let mut crdts: HashMap<String, PNCounter> = HashMap::new();
     let mut rejected_receives: Vec<RejectedReceive> = Vec::new();
     let mut rejected_genesis: Vec<RejectedGenesis> = Vec::new();
+    // Cross-merge dedup: one source SEND funds at most ONE applied
+    // RECEIVE. Without this, two RECEIVE winners citing the same source
+    // each credit the account and the merge creates value. Mirrors the
+    // `consumed_sends` set the ledger keeps on the ingest path.
+    let mut consumed_sources: HashSet<String> = HashSet::new();
     let mut ordered_keys: Vec<(String, u64)> = by_key.keys().cloned().collect();
     ordered_keys.sort();
     for key in ordered_keys {
@@ -221,6 +226,20 @@ pub fn reconcile_partitions(
                         receive_hash: block.hash.clone(),
                         source_hash: source_hash.clone(),
                         reason: "destination_mismatch",
+                    });
+                    continue;
+                }
+
+                // A source SEND funds at most one RECEIVE. A second
+                // RECEIVE citing the same source is rejected instead of
+                // double-crediting the account.
+                if !consumed_sources.insert(source_hash.clone()) {
+                    rejected_receives.push(RejectedReceive {
+                        account: block.account.clone(),
+                        nonce: block.nonce,
+                        receive_hash: block.hash.clone(),
+                        source_hash: source_hash.clone(),
+                        reason: "source_already_consumed",
                     });
                     continue;
                 }
