@@ -1,4 +1,26 @@
 //! Unified error type for the Arxia protocol.
+//!
+//! # Errors are data, not text
+//!
+//! Variants carry typed fields — discriminant enums, counts, the
+//! actual nonce or byte length — so that consumers route on data
+//! rather than parse messages. The first consumer this serves is
+//! relay slashing: deciding how to treat a peer requires knowing
+//! *which* rule was broken (a stale timestamp is a replay signal, a
+//! bad signature is an impersonation signal, a non-Open genesis is an
+//! attempted mint), and that distinction must survive any rewording
+//! of a human-facing message. `Display` still renders an operator-
+//! readable sentence for every variant; the sentence is derived from
+//! the fields, never the other way around.
+//!
+//! Consequences for contributors:
+//!
+//! - Adding a failure mode means adding a variant or a discriminant,
+//!   not formatting a new message into an existing `String`.
+//! - Two different causes must never map to the same variant with
+//!   the same fields — if code can tell them apart, the error must.
+//!   Each discriminant family has a test asserting exactly that, and
+//!   those tests are mutation-verified.
 
 use thiserror::Error;
 
