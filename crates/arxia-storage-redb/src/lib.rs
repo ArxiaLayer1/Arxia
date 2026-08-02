@@ -48,7 +48,7 @@
 //!   transaction. Correct first; batching is what `apply_batch` is
 //!   for.
 
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, StorageFault};
 use arxia_storage::{BatchOp, StorageBackend};
 use redb::{Database, Durability, ReadableDatabase, TableDefinition, WriteTransaction};
 use std::fmt::Display;
@@ -64,7 +64,11 @@ const TABLE: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new("arxia_kv"
 /// Map any redb error into the storage fault variant, preserving its
 /// message.
 fn storage_err(e: impl Display) -> ArxiaError {
-    ArxiaError::Storage(e.to_string())
+    ArxiaError::Storage {
+        fault: StorageFault::Backend {
+            detail: e.to_string(),
+        },
+    }
 }
 
 /// Persistent key-value store over a single redb database file.

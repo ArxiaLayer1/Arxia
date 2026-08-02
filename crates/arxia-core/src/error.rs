@@ -157,8 +157,11 @@ pub enum ArxiaError {
     /// or a poisoned lock. Introduced with the first persistent
     /// backend — before that, storage faults had no variant of their
     /// own and were shoehorned into [`ArxiaError::InvalidKey`].
-    #[error("storage backend error: {0}")]
-    Storage(String),
+    #[error("storage error: {fault}")]
+    Storage {
+        /// The specific storage fault.
+        fault: StorageFault,
+    },
 
     /// Attempt to Open an account that already has blocks in its chain.
     #[error("account already open: chain is not empty")]
@@ -362,6 +365,39 @@ pub enum DidFault {
     },
 }
 
+/// The specific fault behind an [`ArxiaError::Storage`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StorageFault {
+    /// A shared-store lock was poisoned by a panicking writer.
+    #[error("a lock was poisoned by a panicked writer")]
+    LockPoisoned,
+    /// A checksummed value envelope is shorter than its mandatory
+    /// 32-byte Blake3 prefix.
+    #[error("checksummed value too short: got {got} bytes, need at least 32")]
+    ChecksumTooShort {
+        /// The byte count actually stored.
+        got: usize,
+    },
+    /// The Blake3 prefix does not match the value bytes: corruption
+    /// or tampering.
+    #[error("checksum mismatch: the Blake3 prefix does not match the value bytes")]
+    ChecksumMismatch,
+    /// The backing engine reported a fault of its own (I/O error,
+    /// internal corruption, transaction failure).
+    ///
+    /// The one deliberate `String` in the error surface: a foreign
+    /// engine's diagnostic exists only as prose, and dropping it
+    /// would discard the only record of what actually went wrong.
+    /// Confined to std-class backends (redb on desktop), where an
+    /// allocator is trivially available; an embedded backend reports
+    /// through the typed faults, never through this variant.
+    #[error("backend fault: {detail}")]
+    Backend {
+        /// The engine's own diagnostic, verbatim.
+        detail: String,
+    },
+}
+
 /// The specific fault behind an [`ArxiaError::SignatureInvalid`].
 ///
 /// `Verification` is the cryptographic failure: well-formed inputs,
@@ -461,6 +497,26 @@ mod tests {
     /// R2 of the typed-error rework: `Display` must stay operator-
     /// readable. Each rule renders a sentence carrying its payload,
     /// not a bare variant name.
+    /// R2 for the storage family. Backend is the one deliberate
+    /// String survivor; its Display must pass the engine's own
+    /// diagnostic through verbatim.
+    #[test]
+    fn storage_fault_display_is_operator_readable() {
+        let s = ArxiaError::Storage {
+            fault: StorageFault::ChecksumTooShort { got: 12 },
+        };
+        let msg = s.to_string();
+        assert!(
+            msg.contains("storage error") && msg.contains("got 12"),
+            "wrapper must carry family and payload: {msg}"
+        );
+        let b = StorageFault::Backend {
+            detail: "io error: disk full".into(),
+        };
+        assert!(b.to_string().contains("disk full"));
+        assert!(StorageFault::LockPoisoned.to_string().contains("poisoned"));
+    }
+
     /// R2 for the key and DID families.
     #[test]
     fn key_and_did_display_are_operator_readable() {
