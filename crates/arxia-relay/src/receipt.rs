@@ -220,11 +220,7 @@ impl RelayReceipt {
     pub fn verify_at(&self, now_secs: u64, max_skew: Duration) -> Result<(), RelayReceiptError> {
         let max_skew_secs = max_skew.as_secs();
         self.verify()?;
-        let delta = if self.timestamp > now_secs {
-            self.timestamp - now_secs
-        } else {
-            now_secs - self.timestamp
-        };
+        let delta = self.timestamp.abs_diff(now_secs);
         if delta > max_skew_secs {
             return Err(RelayReceiptError::TimestampStale {
                 timestamp: self.timestamp,

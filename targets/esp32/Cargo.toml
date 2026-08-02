@@ -2,7 +2,7 @@
 name = "arxia-esp32"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85.0"
+rust-version = "1.89.0"
 license = "Apache-2.0 OR MIT"
 description = "Arxia for ESP32 (no_std, Xtensa target)"
 authors = []

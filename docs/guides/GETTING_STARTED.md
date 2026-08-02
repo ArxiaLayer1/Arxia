@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Rust 1.85.0 or later
+- Rust 1.89.0 or later
 - Git
 
 ## Clone and Build
