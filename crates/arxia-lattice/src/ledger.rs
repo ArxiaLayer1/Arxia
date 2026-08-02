@@ -177,6 +177,9 @@ impl Ledger {
         // Receive blocks must reference an accepted Send block whose
         // destination matches this account and which has not already
         // been consumed elsewhere in the lattice. See module docstring.
+        // The cited Send's `amount` is the ONLY authority on how much a
+        // Receive may credit — captured here for the conservation check.
+        let mut credited_amount: u64 = 0;
         if let BlockType::Receive { source_hash } = &block.block_type {
             let send_info =
                 self.send_index
@@ -192,9 +195,17 @@ impl Ledger {
                     source_hash: source_hash.clone(),
                 });
             }
+            credited_amount = send_info.amount;
         }
 
         let chain = self.chains.entry(block.account.clone()).or_default();
+
+        // Balances are derived from chain history, never taken from the
+        // block's self-declared `balance` field. `verify_block` proves a
+        // block is well-formed and signed; it says nothing about
+        // economics, and a peer signs its own blocks.
+        let prior_balance = chain.last().map(|b| b.balance).unwrap_or(0);
+        let is_genesis = chain.last().is_none();
 
         // HIGH-003 (commit 031): incremental chain-continuity check.
         // Mirrors `verify_chain_integrity` but per-block, so the ledger
@@ -230,6 +241,69 @@ impl Ledger {
                 return Err(ArxiaError::InvalidGenesis(
                     "genesis must have empty previous".into(),
                 ));
+            }
+        }
+
+        // Value-conservation check. Every accepted block must leave a
+        // balance that follows from the account's prior balance and the
+        // block's own operation. This runs after the continuity checks,
+        // so nonce/hash-chain errors still take precedence, and before
+        // any index mutation, so a rejected block leaves ledger state
+        // untouched.
+        match &block.block_type {
+            BlockType::Open { initial_balance } => {
+                if !is_genesis {
+                    return Err(ArxiaError::OpenNotGenesis {
+                        account: block.account.clone(),
+                    });
+                }
+                if block.balance != *initial_balance {
+                    return Err(ArxiaError::BalanceMismatch {
+                        account: block.account.clone(),
+                        expected: *initial_balance,
+                        got: block.balance,
+                    });
+                }
+            }
+            BlockType::Send { amount, .. } => {
+                if prior_balance < *amount {
+                    return Err(ArxiaError::InsufficientBalance {
+                        available: prior_balance,
+                        required: *amount,
+                    });
+                }
+                let expected = prior_balance - *amount;
+                if block.balance != expected {
+                    return Err(ArxiaError::BalanceMismatch {
+                        account: block.account.clone(),
+                        expected,
+                        got: block.balance,
+                    });
+                }
+            }
+            BlockType::Receive { .. } => {
+                let expected = prior_balance.checked_add(credited_amount).ok_or(
+                    ArxiaError::BalanceOverflow {
+                        current: prior_balance,
+                        incoming: credited_amount,
+                    },
+                )?;
+                if block.balance != expected {
+                    return Err(ArxiaError::BalanceMismatch {
+                        account: block.account.clone(),
+                        expected,
+                        got: block.balance,
+                    });
+                }
+            }
+            BlockType::Revoke { .. } => {
+                if block.balance != prior_balance {
+                    return Err(ArxiaError::BalanceMismatch {
+                        account: block.account.clone(),
+                        expected: prior_balance,
+                        got: block.balance,
+                    });
+                }
             }
         }
 
