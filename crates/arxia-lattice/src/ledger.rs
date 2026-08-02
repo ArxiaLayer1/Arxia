@@ -24,14 +24,22 @@
 //!
 //! # Threading
 //!
-//! `Ledger` is single-threaded by design. The two ingest indices
-//! (`send_index`, `consumed_sends`) are maintained inside
-//! `add_block` as a sequential read-then-write pattern (existence
-//! check → destination match → not-consumed check → insert) ; the
-//! sequence is correct under exclusive `&mut self` access but is
-//! NOT safe under concurrent `add_block` calls. Callers that share
-//! a `Ledger` across threads must serialize access externally
-//! (e.g. wrap in `Mutex`).
+//! `add_block` takes `&mut self`, so two concurrent calls are a
+//! compile error: the borrow checker enforces the serialisation, not
+//! a convention. The read-then-write sequence over `send_index` and
+//! `consumed_sends` is therefore never interleaved in safe Rust.
+//!
+//! `Ledger` is `Send + Sync`, so the supported way to share one is
+//! `Arc<Mutex<Ledger>>`. Its economic invariants — the supply
+//! accumulator and the cross-chain receive dedup — are ledger state
+//! rather than per-call state, so they hold across interleaved
+//! ingestion from many threads. `tests/concurrency.rs` exercises both
+//! with real threads.
+//!
+//! What remains genuinely single-threaded is capacity, not
+//! correctness: the ledger is an in-memory `HashMap` with no pruning,
+//! so a long-lived node needs a storage strategy before it needs more
+//! parallelism.
 //!
 //! # Receive referential integrity
 //!
