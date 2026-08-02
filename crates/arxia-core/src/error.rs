@@ -54,9 +54,16 @@ pub enum ArxiaError {
     #[error("hash chain broken at block {0}")]
     HashChainBroken(usize),
 
-    /// Genesis block validation error.
-    #[error("invalid genesis block: {0}")]
-    InvalidGenesis(String),
+    /// The first block of an account chain violates a genesis rule.
+    ///
+    /// Carries the violated rule as a typed discriminant rather than
+    /// prose, so a consumer (finality scoring, relay slashing) can
+    /// route on *which* rule was broken instead of parsing a message.
+    #[error("invalid genesis block: {rule}")]
+    InvalidGenesis {
+        /// The specific rule the block broke.
+        rule: GenesisRule,
+    },
 
     /// SEND block destination mismatch.
     #[error("SEND block not addressed to this account")]
@@ -238,4 +245,55 @@ pub enum ArxiaError {
         /// Hex-encoded `source_hash` from the `Receive` block.
         source_hash: String,
     },
+}
+
+/// The specific genesis rule an [`ArxiaError::InvalidGenesis`] reports.
+///
+/// A typed discriminant, not prose: two different violations must stay
+/// distinguishable by code, because a consumer deciding how to treat a
+/// peer (mere malformation vs. an attempted second mint) needs the
+/// *which*, not a message to parse. `Display` still renders an
+/// operator-readable sentence for logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GenesisRule {
+    /// The first block's nonce must be exactly 1.
+    #[error("nonce must be 1, got {got}")]
+    NonceMustBeOne {
+        /// The nonce the block actually declared.
+        got: u64,
+    },
+    /// The first block of a chain must be an `Open`.
+    #[error("first block must be OPEN")]
+    FirstBlockMustBeOpen,
+    /// A genesis block has no predecessor, so its `previous` field
+    /// must be empty.
+    #[error("genesis must have empty previous, got a non-empty hash")]
+    PreviousMustBeEmpty,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2 of the typed-error rework: `Display` must stay operator-
+    /// readable. Each rule renders a sentence carrying its payload,
+    /// not a bare variant name.
+    #[test]
+    fn genesis_rule_display_is_operator_readable() {
+        let nonce = GenesisRule::NonceMustBeOne { got: 7 };
+        let open = GenesisRule::FirstBlockMustBeOpen;
+        let prev = GenesisRule::PreviousMustBeEmpty;
+
+        assert_eq!(nonce.to_string(), "nonce must be 1, got 7");
+        assert!(open.to_string().contains("OPEN"));
+        assert!(prev.to_string().contains("previous"));
+
+        // The wrapper composes the rule into its own message.
+        let wrapped = ArxiaError::InvalidGenesis { rule: nonce };
+        let msg = wrapped.to_string();
+        assert!(
+            msg.contains("invalid genesis block") && msg.contains("got 7"),
+            "wrapper must carry both the family and the payload: {msg}"
+        );
+    }
 }

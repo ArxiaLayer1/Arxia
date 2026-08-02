@@ -12,7 +12,7 @@
 //! documented at the `arxia_crypto::ed25519` module level.
 
 use crate::block::{Block, BlockType};
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, GenesisRule};
 
 /// Verify a single block hash and Ed25519 signature.
 pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
@@ -55,20 +55,21 @@ pub fn verify_chain_integrity(chain: &[Block]) -> Result<(), ArxiaError> {
         return Ok(());
     }
     if chain[0].nonce != 1 {
-        return Err(ArxiaError::InvalidGenesis(format!(
-            "nonce must be 1, got {}",
-            chain[0].nonce
-        )));
+        return Err(ArxiaError::InvalidGenesis {
+            rule: GenesisRule::NonceMustBeOne {
+                got: chain[0].nonce,
+            },
+        });
     }
     if !matches!(chain[0].block_type, BlockType::Open { .. }) {
-        return Err(ArxiaError::InvalidGenesis(
-            "first block must be OPEN".into(),
-        ));
+        return Err(ArxiaError::InvalidGenesis {
+            rule: GenesisRule::FirstBlockMustBeOpen,
+        });
     }
     if !chain[0].previous.is_empty() {
-        return Err(ArxiaError::InvalidGenesis(
-            "genesis must have empty previous".into(),
-        ));
+        return Err(ArxiaError::InvalidGenesis {
+            rule: GenesisRule::PreviousMustBeEmpty,
+        });
     }
     verify_block(&chain[0])?;
     for i in 1..chain.len() {
@@ -340,5 +341,57 @@ mod tests {
              the verify boundary (got {:?})",
             result
         );
+    }
+
+    /// R3 of the typed-error rework: three different genesis
+    /// violations must surface as three distinct `GenesisRule`
+    /// discriminants. A change that merges two rules into one — or
+    /// flattens them back into prose — fails one of these asserts;
+    /// that falsifiability is the point, because downstream peer
+    /// scoring will route on the discriminant.
+    ///
+    /// Field tampering is deliberate and sufficient here: the genesis
+    /// rules fire before any signature check, which is itself part of
+    /// the contract (a malformed genesis is reported as such, not as
+    /// a signature failure).
+    #[test]
+    fn each_genesis_violation_has_its_own_discriminant() {
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        let send = alice.send(bob.id(), 1_000, &mut vc).unwrap();
+
+        // Cause 1: first block's nonce is not 1.
+        let mut tampered = alice.chain.clone();
+        tampered[0].nonce = 2;
+        assert!(matches!(
+            verify_chain_integrity(&tampered),
+            Err(ArxiaError::InvalidGenesis {
+                rule: GenesisRule::NonceMustBeOne { got: 2 }
+            })
+        ));
+
+        // Cause 2: first block is a Send (nonce forced to 1 so the
+        // nonce rule cannot mask the type rule).
+        let mut not_open = send.clone();
+        not_open.nonce = 1;
+        assert!(matches!(
+            verify_chain_integrity(&[not_open]),
+            Err(ArxiaError::InvalidGenesis {
+                rule: GenesisRule::FirstBlockMustBeOpen
+            })
+        ));
+
+        // Cause 3: genesis with a non-empty previous.
+        let mut bad_prev = alice.chain[0].clone();
+        bad_prev.previous = "deadbeef".to_string();
+        assert!(matches!(
+            verify_chain_integrity(&[bad_prev]),
+            Err(ArxiaError::InvalidGenesis {
+                rule: GenesisRule::PreviousMustBeEmpty
+            })
+        ));
     }
 }

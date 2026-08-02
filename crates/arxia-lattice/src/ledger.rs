@@ -70,7 +70,7 @@
 
 use crate::block::{Block, BlockType};
 use crate::validation::verify_block;
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, GenesisRule};
 use std::collections::{HashMap, HashSet};
 
 /// Compact summary of an accepted `Send` block, kept in
@@ -249,14 +249,14 @@ impl Ledger {
                 });
             }
             if !matches!(block.block_type, BlockType::Open { .. }) {
-                return Err(ArxiaError::InvalidGenesis(
-                    "first block must be OPEN".into(),
-                ));
+                return Err(ArxiaError::InvalidGenesis {
+                    rule: GenesisRule::FirstBlockMustBeOpen,
+                });
             }
             if !block.previous.is_empty() {
-                return Err(ArxiaError::InvalidGenesis(
-                    "genesis must have empty previous".into(),
-                ));
+                return Err(ArxiaError::InvalidGenesis {
+                    rule: GenesisRule::PreviousMustBeEmpty,
+                });
             }
         }
 
@@ -664,7 +664,7 @@ mod tests {
         );
         let result = ledger.add_block(forged_send_genesis);
         assert!(
-            matches!(result, Err(ArxiaError::InvalidGenesis(_))),
+            matches!(result, Err(ArxiaError::InvalidGenesis { .. })),
             "expected InvalidGenesis (variant check), got {:?}",
             result
         );
