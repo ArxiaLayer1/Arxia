@@ -27,9 +27,14 @@ pub fn verify_block(block: &Block) -> Result<(), ArxiaError> {
     if expected_hash != block.hash {
         return Err(ArxiaError::HashMismatch);
     }
+    // Defense-in-depth: on the current call path this cannot
+    // fire — verify_block recomputes the hash first, and
+    // compute_hash already rejected a malformed account. Kept
+    // typed rather than unwrapped so a future reordering fails
+    // loudly into a meaningful fault.
     let pubkey_bytes: [u8; 32] = hex::decode(&block.account)
-        .map_err(|_| ArxiaError::InvalidKey {
-            fault: KeyFault::HexEncoding,
+        .map_err(|e| ArxiaError::InvalidKey {
+            fault: KeyFault::HexEncoding { source: e },
         })?
         .try_into()
         .map_err(|v: Vec<u8>| ArxiaError::InvalidKey {

@@ -402,10 +402,13 @@ mod tests {
         assert!(matches!(
             err,
             ArxiaError::InvalidDid {
-                fault: DidFault::Length { expected: 32, .. }
+                fault: DidFault::Length {
+                    got: 16,
+                    expected: 32
+                }
             }
         ));
-        assert!(msg.contains("32 bytes") || msg.contains("16"));
+        assert!(msg.contains("32") && msg.contains("16"));
     }
 
     #[test]
@@ -417,7 +420,10 @@ mod tests {
         assert!(matches!(
             err,
             ArxiaError::InvalidDid {
-                fault: DidFault::Length { expected: 32, .. }
+                fault: DidFault::Length {
+                    got: 64,
+                    expected: 32
+                }
             }
         ));
     }
@@ -614,7 +620,7 @@ mod tests {
             ArxiaError::InvalidDid {
                 fault: DidFault::MissingPrefix,
             } => {}
-            other => panic!("expected InvalidKey, got {other:?}"),
+            other => panic!("expected InvalidDid MissingPrefix, got {other:?}"),
         }
     }
 
@@ -638,12 +644,15 @@ mod tests {
         use std::str::FromStr;
         // Valid prefix and valid base58, but decoded length
         // is not 32 bytes.
-        let s = format!("{}{}", DID_PREFIX, "abc"); // decodes to 2 bytes
+        let s = format!("{}{}", DID_PREFIX, "abc"); // decodes to 3 bytes (0x01B97B)
         let err = ParsedArxiaDid::from_str(&s).expect_err("wrong decoded length must reject");
         assert!(matches!(
             err,
             ArxiaError::InvalidDid {
-                fault: DidFault::Length { expected: 32, .. }
+                fault: DidFault::Length {
+                    got: 3,
+                    expected: 32
+                }
             }
         ));
     }

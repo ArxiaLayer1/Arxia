@@ -128,6 +128,20 @@ pub enum ArxiaError {
     #[error("hex decode error: {0}")]
     HexDecode(#[from] hex::FromHexError),
 
+    /// A 32-byte block field decoded to the wrong length during
+    /// compact deserialization. Distinct from [`ArxiaError::InvalidKey`]
+    /// on purpose: `previous` or `source_hash` being malformed is not
+    /// a key fault, and the field discriminant keeps five different
+    /// malformed fields from collapsing into one indistinguishable
+    /// error.
+    #[error("block field {field} must be 64 hex chars (32 bytes), got {got} bytes")]
+    MalformedBlockField {
+        /// Which field was malformed.
+        field: BlockField,
+        /// The byte count actually decoded.
+        got: usize,
+    },
+
     /// A protocol item failed to serialize.
     #[error("serialization failed for {item}")]
     Serialization {
@@ -324,7 +338,7 @@ pub enum GenesisRule {
 }
 
 /// The specific fault behind an [`ArxiaError::InvalidKey`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum KeyFault {
     /// The bytes do not decode to a point on the Ed25519 curve.
     #[error("not a valid point on the Ed25519 curve")]
@@ -340,9 +354,14 @@ pub enum KeyFault {
         got: usize,
     },
     /// The account field is not valid hex, so no key bytes could be
-    /// recovered at all.
-    #[error("the account field is not valid hex")]
-    HexEncoding,
+    /// recovered at all. Carries the decoder's own fault — which
+    /// character, at which index, or an odd length — so nothing the
+    /// prose used to say is lost.
+    #[error("the account field is not valid hex: {source}")]
+    HexEncoding {
+        /// The underlying hex decode fault.
+        source: hex::FromHexError,
+    },
 }
 
 /// The specific fault behind an [`ArxiaError::InvalidDid`].
@@ -396,6 +415,27 @@ pub enum StorageFault {
         /// The engine's own diagnostic, verbatim.
         detail: String,
     },
+}
+
+/// A named 32-byte field of the compact block encoding, for
+/// [`ArxiaError::MalformedBlockField`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BlockField {
+    /// The account public key field.
+    #[error("account")]
+    Account,
+    /// The previous-block hash field.
+    #[error("previous")]
+    Previous,
+    /// The destination field of a Send.
+    #[error("destination")]
+    Destination,
+    /// The source hash field of a Receive.
+    #[error("source_hash")]
+    SourceHash,
+    /// The credential hash field of a Revoke.
+    #[error("credential_hash")]
+    CredentialHash,
 }
 
 /// The specific fault behind an [`ArxiaError::SignatureInvalid`].

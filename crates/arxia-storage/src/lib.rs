@@ -864,7 +864,7 @@ mod tests {
         assert!(matches!(
             err,
             ArxiaError::Storage {
-                fault: StorageFault::ChecksumTooShort { .. }
+                fault: StorageFault::ChecksumTooShort { got: 16 }
             }
         ));
     }
@@ -1056,5 +1056,36 @@ mod tests {
         txn.put(b"k", b"v1").unwrap();
         txn.commit().unwrap();
         assert_eq!(store.get(b"k").unwrap(), Some(b"v1".to_vec()));
+    }
+
+    /// R3, storage family: a poisoned lock must surface as
+    /// LockPoisoned on both the read and the write path, not as any
+    /// other storage fault.
+    #[test]
+    fn poisoned_lock_reports_lock_poisoned_on_read_and_write() {
+        use std::sync::Arc;
+
+        let store = Arc::new(ConcurrentMemoryStorage::new());
+        let poisoner = Arc::clone(&store);
+        // Panic while holding the lock, on another thread, so the
+        // mutex is poisoned but this test keeps running.
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.data.lock().unwrap();
+            panic!("deliberate: poison the storage lock");
+        })
+        .join();
+
+        assert!(matches!(
+            store.get(b"k"),
+            Err(ArxiaError::Storage {
+                fault: StorageFault::LockPoisoned
+            })
+        ));
+        assert!(matches!(
+            store.put(b"k", b"v"),
+            Err(ArxiaError::Storage {
+                fault: StorageFault::LockPoisoned
+            })
+        ));
     }
 }

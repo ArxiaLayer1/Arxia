@@ -106,8 +106,8 @@ impl Block {
         // from entering any storage / gossip / persistence path
         // even before it reaches verify).
         let pubkey_bytes: [u8; 32] = hex::decode(account)
-            .map_err(|_| ArxiaError::InvalidKey {
-                fault: KeyFault::HexEncoding,
+            .map_err(|e| ArxiaError::InvalidKey {
+                fault: KeyFault::HexEncoding { source: e },
             })?
             .try_into()
             .map_err(|v: Vec<u8>| ArxiaError::InvalidKey {
@@ -270,5 +270,30 @@ mod tests {
         )
         .unwrap();
         assert_ne!(h_open, h_send);
+    }
+
+    /// R3, key family via the primary reachable path: compute_hash is
+    /// where a malformed account first meets the key decoder, and the
+    /// two structural causes must keep distinct discriminants. A
+    /// merge-mutant collapsing HexEncoding into Length fails here.
+    #[test]
+    fn compute_hash_distinguishes_non_hex_from_wrong_length_account() {
+        let bt = BlockType::Open { initial_balance: 0 };
+
+        let non_hex = Block::compute_hash(&"zz".repeat(32), "", &bt, 0, 1, 0);
+        assert!(matches!(
+            non_hex,
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::HexEncoding { .. }
+            })
+        ));
+
+        let short = Block::compute_hash(&"ab".repeat(8), "", &bt, 0, 1, 0);
+        assert!(matches!(
+            short,
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::Length { got: 8 }
+            })
+        ));
     }
 }

@@ -38,9 +38,9 @@
 //! function before trusting the bytes. It rejects:
 //!
 //! - bytes that do not decompress to a Curve25519 point
-//!   (`InvalidKey("not a valid Ed25519 point")`)
+//!   (`InvalidKey { fault: KeyFault::NotOnCurve }`)
 //! - low-order points (the identity + 7 small-subgroup points)
-//!   (`InvalidKey("low-order Ed25519 public key (weak)")`)
+//!   (`InvalidKey { fault: KeyFault::WeakPoint }`)
 //!
 //! Without this gate, a DID can be constructed under a low-order
 //! pubkey; downstream verification would never succeed for that
@@ -481,6 +481,15 @@ mod tests {
             validate_pubkey_strict(&identity),
             Err(ArxiaError::InvalidKey {
                 fault: KeyFault::WeakPoint
+            })
+        ));
+
+        // The verify() entry point maps the same undecodable input to
+        // the same discriminant — both construction sites pinned.
+        assert!(matches!(
+            verify(&off_curve, &[0x42u8; 32], &[0u8; 64]),
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::NotOnCurve
             })
         ));
     }
