@@ -22,6 +22,7 @@
 //!   Each discriminant family has a test asserting exactly that, and
 //!   those tests are mutation-verified.
 
+use alloc::string::String;
 use thiserror::Error;
 
 /// Unified error type across all Arxia crates.
@@ -125,8 +126,16 @@ pub enum ArxiaError {
     NoNeighbors,
 
     /// Hex decoding error.
+    ///
+    /// Carries the decoder's error by value, converted via a manual
+    /// `From` impl rather than `#[from]`: thiserror's `#[from]` also
+    /// derives a `source()` chain, which requires the foreign type to
+    /// implement the `Error` trait — and `hex` only provides that
+    /// under its `std` feature. The payload and every `?` conversion
+    /// are unchanged; only the (previously implicit) source chain is
+    /// dropped.
     #[error("hex decode error: {0}")]
-    HexDecode(#[from] hex::FromHexError),
+    HexDecode(hex::FromHexError),
 
     /// A 32-byte block field decoded to the wrong length during
     /// compact deserialization. Distinct from [`ArxiaError::InvalidKey`]
@@ -337,8 +346,14 @@ pub enum GenesisRule {
     PreviousMustBeEmpty,
 }
 
+impl From<hex::FromHexError> for ArxiaError {
+    fn from(e: hex::FromHexError) -> Self {
+        ArxiaError::HexDecode(e)
+    }
+}
+
 /// The specific fault behind an [`ArxiaError::InvalidKey`].
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum KeyFault {
     /// The bytes do not decode to a point on the Ed25519 curve.
     #[error("not a valid point on the Ed25519 curve")]
@@ -354,14 +369,51 @@ pub enum KeyFault {
         got: usize,
     },
     /// The account field is not valid hex, so no key bytes could be
-    /// recovered at all. Carries the decoder's own fault — which
-    /// character, at which index, or an odd length — so nothing the
-    /// prose used to say is lost.
-    #[error("the account field is not valid hex: {source}")]
+    /// recovered at all. Carries the decoder's fault mirrored into a
+    /// local type — which character, at which index, or an odd
+    /// length — so nothing the prose used to say is lost. A mirror
+    /// rather than the foreign type, because a field named `source`
+    /// makes thiserror derive an `Error`-trait bound that `hex` only
+    /// satisfies under std; the mirror also keeps `KeyFault: Eq`.
+    #[error("the account field is not valid hex: {kind}")]
     HexEncoding {
         /// The underlying hex decode fault.
-        source: hex::FromHexError,
+        kind: HexFaultKind,
     },
+}
+
+/// A hex decode fault, mirrored from [`hex::FromHexError`] so error
+/// enums can carry it without the foreign type's std-only `Error`
+/// impl. The conversion is exhaustive: a new upstream variant fails
+/// to compile here until mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HexFaultKind {
+    /// An invalid character, with its value and byte index.
+    #[error("invalid character {c:?} at position {index}")]
+    InvalidCharacter {
+        /// The offending character.
+        c: char,
+        /// Its byte index in the input.
+        index: usize,
+    },
+    /// The input has an odd number of hex digits.
+    #[error("odd number of digits")]
+    OddLength,
+    /// The input length does not match the expected output size.
+    #[error("invalid string length")]
+    InvalidLength,
+}
+
+impl From<hex::FromHexError> for HexFaultKind {
+    fn from(e: hex::FromHexError) -> Self {
+        match e {
+            hex::FromHexError::InvalidHexCharacter { c, index } => {
+                HexFaultKind::InvalidCharacter { c, index }
+            }
+            hex::FromHexError::OddLength => HexFaultKind::OddLength,
+            hex::FromHexError::InvalidStringLength => HexFaultKind::InvalidLength,
+        }
+    }
 }
 
 /// The specific fault behind an [`ArxiaError::InvalidDid`].

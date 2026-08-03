@@ -137,7 +137,7 @@ impl GossipNode {
         // loudly into a meaningful fault.
         let account_bytes: [u8; 32] = hex::decode(&block.account)
             .map_err(|e| ArxiaError::InvalidKey {
-                fault: KeyFault::HexEncoding { source: e },
+                fault: KeyFault::HexEncoding { kind: e.into() },
             })?
             .try_into()
             .map_err(|v: Vec<u8>| ArxiaError::InvalidKey {

@@ -8,10 +8,28 @@ license.workspace = true
 repository.workspace = true
 description = "Cryptographic primitives for the Arxia protocol"
 
+# Declared directly rather than workspace-inherited so default
+# features can be turned off (cargo ignores that override on inherited
+# dependencies). Versions match the workspace pins.
 [dependencies]
-arxia-core = { workspace = true }
-ed25519-dalek = { workspace = true }
-blake3 = { workspace = true }
-chacha20poly1305 = { workspace = true }
-rand = { workspace = true }
-hex = { workspace = true }
+arxia-core = { path = "../arxia-core", default-features = false }
+ed25519-dalek = { version = "3.0", default-features = false, features = ["fast", "zeroize"] }
+blake3 = { version = "1.8", default-features = false }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+rand = { version = "0.10.2", optional = true }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[features]
+# std (default) is where key GENERATION lives: SysRng needs an OS
+# entropy source. A no_std build signs and verifies but does not
+# generate — embedded key generation arrives with a hardware RNG, not
+# with a silent fallback.
+default = ["std"]
+std = [
+    "arxia-core/std",
+    "ed25519-dalek/rand_core",
+    "blake3/std",
+    "chacha20poly1305/getrandom",
+    "hex/std",
+    "dep:rand",
+]

@@ -84,11 +84,17 @@
 //! implemented and measured — the embedded target and a full node
 //! have requirements no single engine satisfies.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
 #[cfg(feature = "conformance")]
 pub mod conformance;
 
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use arxia_core::{ArxiaError, StorageFault};
-use std::collections::BTreeMap;
+#[cfg(feature = "std")]
 use std::sync::Mutex;
 
 /// A single operation inside an [`StorageBackend::apply_batch`] call.
@@ -357,7 +363,7 @@ impl MemoryTransaction<'_> {
     pub fn commit(mut self) -> Result<(), ArxiaError> {
         // Move the staging buffer out so we can drain it without
         // re-borrowing self.
-        let drained = std::mem::take(&mut self.staged);
+        let drained = core::mem::take(&mut self.staged);
         for (key, op) in drained {
             match op {
                 StagedOp::Put(value) => {
@@ -452,10 +458,12 @@ impl MemoryStorage {
 /// for h in handles { h.join().unwrap(); }
 /// assert_eq!(store.len().unwrap(), 4);
 /// ```
+#[cfg(feature = "std")]
 pub struct ConcurrentMemoryStorage {
     data: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
+#[cfg(feature = "std")]
 impl ConcurrentMemoryStorage {
     /// Create a new empty thread-safe in-memory store.
     pub fn new() -> Self {
@@ -517,6 +525,7 @@ impl ConcurrentMemoryStorage {
     }
 }
 
+#[cfg(feature = "std")]
 impl Default for ConcurrentMemoryStorage {
     fn default() -> Self {
         Self::new()

@@ -8,10 +8,15 @@ description = "Storage abstraction for Arxia, with in-memory backends"
 authors = []
 
 [dependencies]
-arxia-core = { path = "../arxia-core" }
-arxia-crypto = { path = "../arxia-crypto" }
+arxia-core = { path = "../arxia-core", default-features = false }
+arxia-crypto = { path = "../arxia-crypto", default-features = false }
 
 [features]
+# std (default) is where the Mutex-backed ConcurrentMemoryStorage
+# lives; a no_std build keeps the trait, MemoryStorage, transactions,
+# the checksum envelope and the conformance checks.
+default = ["std"]
+std = ["arxia-core/std", "arxia-crypto/std"]
 # Exposes the generic StorageBackend conformance checks so backend
 # crates can hold their implementations to the same suite.
 conformance = []

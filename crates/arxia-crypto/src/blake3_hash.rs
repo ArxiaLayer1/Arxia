@@ -1,5 +1,7 @@
 //! Blake3 hashing utilities.
 
+use alloc::string::{String, ToString};
+
 /// Compute Blake3 hash and return the hex-encoded string.
 pub fn hash_blake3(data: &[u8]) -> String {
     let hash = blake3::hash(data);

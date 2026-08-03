@@ -1,6 +1,7 @@
 //! Fundamental types shared across the Arxia workspace.
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Ed25519 public key (32 bytes).
@@ -68,6 +69,7 @@ impl BlockTypeTag {
 /// platforms (Windows, Linux, macOS, ESP-IDF). Only the
 /// `duration_since(UNIX_EPOCH)` step could fail pre-fix, and that
 /// failure mode is now absorbed.
+#[cfg(feature = "std")]
 pub fn now_millis() -> u64 {
     millis_since_epoch_or_zero(SystemTime::now())
 }
@@ -78,6 +80,7 @@ pub fn now_millis() -> u64 {
 /// Exposed for testability — call with a synthesized
 /// `UNIX_EPOCH - Duration::from_secs(1)` to verify the no-panic
 /// contract without an actual broken RTC.
+#[cfg(feature = "std")]
 pub fn millis_since_epoch_or_zero(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

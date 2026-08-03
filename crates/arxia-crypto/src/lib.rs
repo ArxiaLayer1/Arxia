@@ -9,8 +9,11 @@
 //! NOT over the hex-encoded string (64 bytes). This was a bug fixed in
 //! PoC v0.3.0 and must never be reintroduced.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+
+extern crate alloc;
 
 pub mod blake3_hash;
 pub mod chacha20;
@@ -18,7 +21,9 @@ pub mod ed25519;
 pub mod slip39;
 
 pub use blake3_hash::{hash_blake3, hash_blake3_bytes};
-pub use ed25519::{generate_keypair, sign, validate_pubkey_strict, verify};
+#[cfg(feature = "std")]
+pub use ed25519::generate_keypair;
+pub use ed25519::{sign, validate_pubkey_strict, verify};
 
 /// Marker error returned by crypto functions that are deliberately
 /// left un-implemented until a future milestone.
@@ -34,10 +39,10 @@ pub use ed25519::{generate_keypair, sign, validate_pubkey_strict, verify};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unimplemented;
 
-impl std::fmt::Display for Unimplemented {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Unimplemented {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("feature not implemented; reserved for a future milestone")
     }
 }
 
-impl std::error::Error for Unimplemented {}
+impl core::error::Error for Unimplemented {}

@@ -68,3 +68,21 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -Dwarnings
+
+  no-std:
+    name: no_std (bare-metal riscv32imc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89.0"
+          targets: riscv32imc-unknown-none-elf
+      - uses: Swatinem/rust-cache@v2
+      # The acceptance gate for the portable core: these crates must
+      # build for a bare-metal target with no default features, so a
+      # dependency (or a std usage) sneaking back in fails here, not
+      # on the bench. The conformance feature is built too, because
+      # the flash backend will be held to that suite on this target.
+      - run: cargo build -p arxia-core -p arxia-crypto -p arxia-storage --no-default-features --target riscv32imc-unknown-none-elf
+      - run: cargo build -p arxia-storage --no-default-features --features conformance --target riscv32imc-unknown-none-elf
