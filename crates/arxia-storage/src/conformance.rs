@@ -27,6 +27,9 @@
 
 use crate::{BatchOp, StorageBackend};
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 /// Collect every `(key, value)` under `prefix`, in visit order.
 pub fn collect_prefix<B: StorageBackend>(b: &B, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out = Vec::new();
