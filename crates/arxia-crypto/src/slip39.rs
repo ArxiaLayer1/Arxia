@@ -14,6 +14,8 @@
 //! process. Replacing the panic with an explicit `Err(Unimplemented)`
 //! surfaces the unimplemented state to the type system.
 
+use alloc::vec::Vec;
+
 use crate::Unimplemented;
 
 /// Split a seed into `shares` shares with threshold `threshold`.

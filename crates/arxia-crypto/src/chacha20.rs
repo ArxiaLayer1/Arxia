@@ -15,6 +15,8 @@
 //! callers are forced to handle it at compile time (via `?` or
 //! `match`) rather than encountering it at runtime.
 
+use alloc::vec::Vec;
+
 use crate::Unimplemented;
 
 /// Encrypt data with ChaCha20-Poly1305.
