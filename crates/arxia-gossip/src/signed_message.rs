@@ -207,7 +207,7 @@ impl SignedGossipMessage {
             .map_err(|_| SignedGossipMessageError::InvalidSignatureLength)?;
         let canonical = Self::canonical_bytes(&self.message, &self.sender_pubkey);
         arxia_crypto::verify(&self.sender_pubkey, &canonical, &sig).map_err(|e| match e {
-            ArxiaError::InvalidKey(_) => SignedGossipMessageError::InvalidPublicKey,
+            ArxiaError::InvalidKey { .. } => SignedGossipMessageError::InvalidPublicKey,
             _ => SignedGossipMessageError::SignatureInvalid,
         })
     }

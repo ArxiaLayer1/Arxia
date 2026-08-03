@@ -100,3 +100,23 @@ fn data_survives_a_clean_reopen() {
     assert!(!store.contains(b"k:gone").expect("contains"));
     assert_eq!(conformance::collect_prefix(&store, b"k:").len(), 2);
 }
+/// The backend fault path, pinned through the public API: opening a
+/// database in a directory that does not exist surfaces the engine's
+/// I/O diagnostic as StorageFault::Backend, detail preserved.
+#[test]
+fn engine_faults_surface_as_backend_with_detail() {
+    use arxia_core::{ArxiaError, StorageFault};
+
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let bad = dir.path().join("no-such-parent").join("db.redb");
+    let err = match RedbStorage::open(&bad) {
+        Err(e) => e,
+        Ok(_) => panic!("missing parent dir must fail"),
+    };
+    match err {
+        ArxiaError::Storage {
+            fault: StorageFault::Backend { detail },
+        } => assert!(!detail.is_empty(), "engine diagnostic must be preserved"),
+        other => panic!("expected Storage Backend fault, got {other:?}"),
+    }
+}

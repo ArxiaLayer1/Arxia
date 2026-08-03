@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use arxia_core::{ArxiaError, SerializedItem};
+use arxia_core::{ArxiaError, KeyFault, SerializedItem};
 
 /// The type of operation a block represents.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -106,9 +106,13 @@ impl Block {
         // from entering any storage / gossip / persistence path
         // even before it reaches verify).
         let pubkey_bytes: [u8; 32] = hex::decode(account)
-            .map_err(|e| ArxiaError::InvalidKey(e.to_string()))?
+            .map_err(|e| ArxiaError::InvalidKey {
+                fault: KeyFault::HexEncoding { source: e },
+            })?
             .try_into()
-            .map_err(|_| ArxiaError::InvalidKey("bad key length".into()))?;
+            .map_err(|v: Vec<u8>| ArxiaError::InvalidKey {
+                fault: KeyFault::Length { got: v.len() },
+            })?;
         arxia_crypto::validate_pubkey_strict(&pubkey_bytes)?;
         let bt_json = serde_json::to_string(block_type).map_err(|_| ArxiaError::Serialization {
             item: SerializedItem::BlockType,
@@ -266,5 +270,30 @@ mod tests {
         )
         .unwrap();
         assert_ne!(h_open, h_send);
+    }
+
+    /// R3, key family via the primary reachable path: compute_hash is
+    /// where a malformed account first meets the key decoder, and the
+    /// two structural causes must keep distinct discriminants. A
+    /// merge-mutant collapsing HexEncoding into Length fails here.
+    #[test]
+    fn compute_hash_distinguishes_non_hex_from_wrong_length_account() {
+        let bt = BlockType::Open { initial_balance: 0 };
+
+        let non_hex = Block::compute_hash(&"zz".repeat(32), "", &bt, 0, 1, 0);
+        assert!(matches!(
+            non_hex,
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::HexEncoding { .. }
+            })
+        ));
+
+        let short = Block::compute_hash(&"ab".repeat(8), "", &bt, 0, 1, 0);
+        assert!(matches!(
+            short,
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::Length { got: 8 }
+            })
+        ));
     }
 }

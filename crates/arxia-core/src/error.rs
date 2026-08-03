@@ -128,6 +128,20 @@ pub enum ArxiaError {
     #[error("hex decode error: {0}")]
     HexDecode(#[from] hex::FromHexError),
 
+    /// A 32-byte block field decoded to the wrong length during
+    /// compact deserialization. Distinct from [`ArxiaError::InvalidKey`]
+    /// on purpose: `previous` or `source_hash` being malformed is not
+    /// a key fault, and the field discriminant keeps five different
+    /// malformed fields from collapsing into one indistinguishable
+    /// error.
+    #[error("block field {field} must be 64 hex chars (32 bytes), got {got} bytes")]
+    MalformedBlockField {
+        /// Which field was malformed.
+        field: BlockField,
+        /// The byte count actually decoded.
+        got: usize,
+    },
+
     /// A protocol item failed to serialize.
     #[error("serialization failed for {item}")]
     Serialization {
@@ -135,16 +149,33 @@ pub enum ArxiaError {
         item: SerializedItem,
     },
 
-    /// Invalid cryptographic key.
-    #[error("invalid key: {0}")]
-    InvalidKey(String),
+    /// A 32-byte Ed25519 public key failed structural or curve
+    /// validation.
+    #[error("invalid key: {fault}")]
+    InvalidKey {
+        /// What exactly is wrong with the key.
+        fault: KeyFault,
+    },
+
+    /// A DID string failed to parse. Split from [`ArxiaError::InvalidKey`]:
+    /// a malformed identifier string and a cryptographically unusable
+    /// key are different signals, and only the latter concerns the
+    /// curve.
+    #[error("invalid DID: {fault}")]
+    InvalidDid {
+        /// What exactly is wrong with the DID string.
+        fault: DidFault,
+    },
 
     /// A storage backend failed: an I/O error, a corrupted database,
     /// or a poisoned lock. Introduced with the first persistent
     /// backend — before that, storage faults had no variant of their
     /// own and were shoehorned into [`ArxiaError::InvalidKey`].
-    #[error("storage backend error: {0}")]
-    Storage(String),
+    #[error("storage error: {fault}")]
+    Storage {
+        /// The specific storage fault.
+        fault: StorageFault,
+    },
 
     /// Attempt to Open an account that already has blocks in its chain.
     #[error("account already open: chain is not empty")]
@@ -306,6 +337,107 @@ pub enum GenesisRule {
     PreviousMustBeEmpty,
 }
 
+/// The specific fault behind an [`ArxiaError::InvalidKey`].
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum KeyFault {
+    /// The bytes do not decode to a point on the Ed25519 curve.
+    #[error("not a valid point on the Ed25519 curve")]
+    NotOnCurve,
+    /// The point is low-order (small-subgroup / weak), rejected by
+    /// strict validation even though it is on the curve.
+    #[error("low-order (weak) public key")]
+    WeakPoint,
+    /// The key is not exactly 32 bytes.
+    #[error("expected 32 key bytes, got {got}")]
+    Length {
+        /// The byte count actually supplied.
+        got: usize,
+    },
+    /// The account field is not valid hex, so no key bytes could be
+    /// recovered at all. Carries the decoder's own fault — which
+    /// character, at which index, or an odd length — so nothing the
+    /// prose used to say is lost.
+    #[error("the account field is not valid hex: {source}")]
+    HexEncoding {
+        /// The underlying hex decode fault.
+        source: hex::FromHexError,
+    },
+}
+
+/// The specific fault behind an [`ArxiaError::InvalidDid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DidFault {
+    /// The string does not start with the canonical `did:arxia:`
+    /// prefix.
+    #[error("missing the required 'did:arxia:' prefix")]
+    MissingPrefix,
+    /// The identifier part is not valid base58.
+    #[error("the identifier is not valid base58")]
+    Base58,
+    /// The identifier decodes to the wrong number of bytes.
+    #[error("the identifier must decode to {expected} bytes, got {got}")]
+    Length {
+        /// The byte count actually decoded.
+        got: usize,
+        /// The byte count the DID scheme requires.
+        expected: usize,
+    },
+}
+
+/// The specific fault behind an [`ArxiaError::Storage`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StorageFault {
+    /// A shared-store lock was poisoned by a panicking writer.
+    #[error("a lock was poisoned by a panicked writer")]
+    LockPoisoned,
+    /// A checksummed value envelope is shorter than its mandatory
+    /// 32-byte Blake3 prefix.
+    #[error("checksummed value too short: got {got} bytes, need at least 32")]
+    ChecksumTooShort {
+        /// The byte count actually stored.
+        got: usize,
+    },
+    /// The Blake3 prefix does not match the value bytes: corruption
+    /// or tampering.
+    #[error("checksum mismatch: the Blake3 prefix does not match the value bytes")]
+    ChecksumMismatch,
+    /// The backing engine reported a fault of its own (I/O error,
+    /// internal corruption, transaction failure).
+    ///
+    /// The one deliberate `String` in the error surface: a foreign
+    /// engine's diagnostic exists only as prose, and dropping it
+    /// would discard the only record of what actually went wrong.
+    /// Confined to std-class backends (redb on desktop), where an
+    /// allocator is trivially available; an embedded backend reports
+    /// through the typed faults, never through this variant.
+    #[error("backend fault: {detail}")]
+    Backend {
+        /// The engine's own diagnostic, verbatim.
+        detail: String,
+    },
+}
+
+/// A named 32-byte field of the compact block encoding, for
+/// [`ArxiaError::MalformedBlockField`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BlockField {
+    /// The account public key field.
+    #[error("account")]
+    Account,
+    /// The previous-block hash field.
+    #[error("previous")]
+    Previous,
+    /// The destination field of a Send.
+    #[error("destination")]
+    Destination,
+    /// The source hash field of a Receive.
+    #[error("source_hash")]
+    SourceHash,
+    /// The credential hash field of a Revoke.
+    #[error("credential_hash")]
+    CredentialHash,
+}
+
 /// The specific fault behind an [`ArxiaError::SignatureInvalid`].
 ///
 /// `Verification` is the cryptographic failure: well-formed inputs,
@@ -405,6 +537,53 @@ mod tests {
     /// R2 of the typed-error rework: `Display` must stay operator-
     /// readable. Each rule renders a sentence carrying its payload,
     /// not a bare variant name.
+    /// R2 for the storage family. Backend is the one deliberate
+    /// String survivor; its Display must pass the engine's own
+    /// diagnostic through verbatim.
+    #[test]
+    fn storage_fault_display_is_operator_readable() {
+        let s = ArxiaError::Storage {
+            fault: StorageFault::ChecksumTooShort { got: 12 },
+        };
+        let msg = s.to_string();
+        assert!(
+            msg.contains("storage error") && msg.contains("got 12"),
+            "wrapper must carry family and payload: {msg}"
+        );
+        let b = StorageFault::Backend {
+            detail: "io error: disk full".into(),
+        };
+        assert!(b.to_string().contains("disk full"));
+        assert!(StorageFault::LockPoisoned.to_string().contains("poisoned"));
+    }
+
+    /// R2 for the key and DID families.
+    #[test]
+    fn key_and_did_display_are_operator_readable() {
+        let k = ArxiaError::InvalidKey {
+            fault: KeyFault::Length { got: 31 },
+        };
+        let msg = k.to_string();
+        assert!(
+            msg.contains("invalid key") && msg.contains("got 31"),
+            "wrapper must carry family and payload: {msg}"
+        );
+        assert!(KeyFault::WeakPoint.to_string().contains("weak"));
+
+        let d = ArxiaError::InvalidDid {
+            fault: DidFault::Length {
+                got: 30,
+                expected: 32,
+            },
+        };
+        let msg = d.to_string();
+        assert!(
+            msg.contains("invalid DID") && msg.contains("30") && msg.contains("32"),
+            "wrapper must carry family and both payloads: {msg}"
+        );
+        assert!(DidFault::MissingPrefix.to_string().contains("did:arxia:"));
+    }
+
     /// R2 for the signature family.
     #[test]
     fn signature_fault_display_is_operator_readable() {

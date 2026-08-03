@@ -48,7 +48,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, DidFault};
 use serde::{Deserialize, Serialize};
 
 /// Required prefix for every Arxia DID string.
@@ -78,7 +78,7 @@ impl ArxiaDid {
     ///
     /// # Errors
     ///
-    /// Returns `Err(ArxiaError::InvalidKey(reason))` for off-curve
+    /// Returns `Err(ArxiaError::InvalidKey { fault })` for off-curve
     /// or low-order pubkey bytes.
     pub fn from_public_key(public_key: &[u8; 32]) -> Result<Self, ArxiaError> {
         arxia_crypto::validate_pubkey_strict(public_key)?;
@@ -109,9 +109,11 @@ impl ArxiaDid {
     /// back to the raw string. Recommended for any caller that
     /// hashes / logs / contracts the identifier portion (HIGH-019).
     pub fn identifier_strict(&self) -> Result<&str, ArxiaError> {
-        self.did.strip_prefix(DID_PREFIX).ok_or_else(|| {
-            ArxiaError::InvalidKey(format!("DID missing required prefix '{DID_PREFIX}'"))
-        })
+        self.did
+            .strip_prefix(DID_PREFIX)
+            .ok_or(ArxiaError::InvalidDid {
+                fault: DidFault::MissingPrefix,
+            })
     }
 }
 
@@ -174,7 +176,7 @@ impl std::str::FromStr for ParsedArxiaDid {
 
     /// LOW-010 (commit 079): standard `FromStr` impl that
     /// delegates to [`parse_did`]. Returned `Err` is
-    /// `ArxiaError::InvalidKey(reason)` exactly as `parse_did`
+    /// `ArxiaError::InvalidDid { fault }` exactly as `parse_did`
     /// produces — no information loss compared to the
     /// function-style call.
     ///
@@ -205,22 +207,27 @@ impl std::str::FromStr for ParsedArxiaDid {
 ///
 /// # Errors
 ///
-/// Returns `Err(ArxiaError::InvalidKey(reason))` with a
-/// human-readable diagnostic for each failure class.
+/// Returns `Err(ArxiaError::InvalidDid { fault })` with a typed
+/// discriminant for each failure class.
 pub fn parse_did(s: &str) -> Result<ParsedArxiaDid, ArxiaError> {
-    let identifier_b58 = s.strip_prefix(DID_PREFIX).ok_or_else(|| {
-        ArxiaError::InvalidKey(format!("DID missing required prefix '{DID_PREFIX}'"))
+    let identifier_b58 = s.strip_prefix(DID_PREFIX).ok_or(ArxiaError::InvalidDid {
+        fault: DidFault::MissingPrefix,
     })?;
     let bytes = bs58::decode(identifier_b58)
         .into_vec()
-        .map_err(|e| ArxiaError::InvalidKey(format!("DID identifier is not valid base58: {e}")))?;
-    let identifier_hash: [u8; DID_IDENTIFIER_BYTE_LEN] =
-        bytes.as_slice().try_into().map_err(|_| {
-            ArxiaError::InvalidKey(format!(
-                "DID identifier must decode to {DID_IDENTIFIER_BYTE_LEN} bytes, got {}",
-                bytes.len()
-            ))
+        .map_err(|_| ArxiaError::InvalidDid {
+            fault: DidFault::Base58,
         })?;
+    let identifier_hash: [u8; DID_IDENTIFIER_BYTE_LEN] =
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ArxiaError::InvalidDid {
+                fault: DidFault::Length {
+                    got: bytes.len(),
+                    expected: DID_IDENTIFIER_BYTE_LEN,
+                },
+            })?;
     Ok(ParsedArxiaDid {
         did: s.to_string(),
         identifier_hash,
@@ -230,6 +237,7 @@ pub fn parse_did(s: &str) -> Result<ParsedArxiaDid, ArxiaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arxia_core::KeyFault;
     use arxia_crypto::generate_keypair;
 
     #[test]
@@ -274,7 +282,12 @@ mod tests {
     #[test]
     fn test_did_from_public_key_rejects_zero_pubkey() {
         let err = ArxiaDid::from_public_key(&[0u8; 32]).expect_err("zero pubkey must be rejected");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidKey {
+                fault: KeyFault::WeakPoint
+            }
+        ));
     }
 
     #[test]
@@ -286,7 +299,12 @@ mod tests {
         ];
         let err = ArxiaDid::from_public_key(&low_order_pk)
             .expect_err("low-order pubkey must be rejected");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidKey {
+                fault: KeyFault::WeakPoint
+            }
+        ));
     }
 
     #[test]
@@ -326,7 +344,12 @@ mod tests {
         let err =
             parse_did("did:other:abc123").expect_err("wrong-namespace prefix must be rejected");
         let msg = format!("{err}");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::MissingPrefix
+            }
+        ));
         assert!(msg.contains("prefix"));
     }
 
@@ -334,14 +357,24 @@ mod tests {
     fn test_parse_did_rejects_missing_prefix_entirely() {
         // No prefix at all → reject.
         let err = parse_did("just-some-string").expect_err("no prefix must be rejected");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::MissingPrefix
+            }
+        ));
     }
 
     #[test]
     fn test_parse_did_rejects_empty_string() {
         // Edge case: empty string.
         let err = parse_did("").expect_err("empty string must be rejected");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::MissingPrefix
+            }
+        ));
     }
 
     #[test]
@@ -350,7 +383,12 @@ mod tests {
         // base58 alphabet).
         let err = parse_did("did:arxia:0OOIl").expect_err("non-base58 must be rejected");
         let msg = format!("{err}");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::Base58
+            }
+        ));
         assert!(msg.contains("base58"));
     }
 
@@ -361,8 +399,16 @@ mod tests {
         let did_str = format!("{DID_PREFIX}{short}");
         let err = parse_did(&did_str).expect_err("short identifier must be rejected");
         let msg = format!("{err}");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
-        assert!(msg.contains("32 bytes") || msg.contains("16"));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::Length {
+                    got: 16,
+                    expected: 32
+                }
+            }
+        ));
+        assert!(msg.contains("32") && msg.contains("16"));
     }
 
     #[test]
@@ -371,7 +417,15 @@ mod tests {
         let long = bs58::encode(&[0u8; 64]).into_string();
         let did_str = format!("{DID_PREFIX}{long}");
         let err = parse_did(&did_str).expect_err("long identifier must be rejected");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::Length {
+                    got: 64,
+                    expected: 32
+                }
+            }
+        ));
     }
 
     #[test]
@@ -420,7 +474,12 @@ mod tests {
             .identifier_strict()
             .expect_err("missing prefix must err");
         let msg = format!("{err}");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::MissingPrefix
+            }
+        ));
         assert!(msg.contains("prefix"));
         // The lenient `identifier()` falls back to the full string
         // — this is the surface the audit flagged.
@@ -554,33 +613,48 @@ mod tests {
     }
 
     #[test]
-    fn test_fromstr_returns_invalid_key_on_missing_prefix() {
+    fn test_fromstr_returns_invalid_did_on_missing_prefix() {
         use std::str::FromStr;
         let err = ParsedArxiaDid::from_str("not-a-did").expect_err("non-DID string must reject");
         match err {
-            ArxiaError::InvalidKey(msg) => assert!(msg.contains("prefix")),
-            other => panic!("expected InvalidKey, got {other:?}"),
+            ArxiaError::InvalidDid {
+                fault: DidFault::MissingPrefix,
+            } => {}
+            other => panic!("expected InvalidDid MissingPrefix, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_fromstr_returns_invalid_key_on_bad_base58() {
+    fn test_fromstr_returns_invalid_did_on_bad_base58() {
         use std::str::FromStr;
         // Prefix is correct but identifier portion has invalid
         // base58 characters (0OIl are excluded from base58).
         let err =
             ParsedArxiaDid::from_str("did:arxia:0OIl0OIl").expect_err("bad base58 must reject");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::Base58
+            }
+        ));
     }
 
     #[test]
-    fn test_fromstr_returns_invalid_key_on_wrong_length_after_decode() {
+    fn test_fromstr_returns_invalid_did_on_wrong_length_after_decode() {
         use std::str::FromStr;
         // Valid prefix and valid base58, but decoded length
         // is not 32 bytes.
-        let s = format!("{}{}", DID_PREFIX, "abc"); // decodes to 2 bytes
+        let s = format!("{}{}", DID_PREFIX, "abc"); // decodes to 3 bytes (0x01B97B)
         let err = ParsedArxiaDid::from_str(&s).expect_err("wrong decoded length must reject");
-        assert!(matches!(err, ArxiaError::InvalidKey(_)));
+        assert!(matches!(
+            err,
+            ArxiaError::InvalidDid {
+                fault: DidFault::Length {
+                    got: 3,
+                    expected: 32
+                }
+            }
+        ));
     }
 
     #[test]

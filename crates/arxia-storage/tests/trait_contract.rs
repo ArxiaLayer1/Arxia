@@ -8,7 +8,7 @@
 //! `conformance::batch_atomicity_holds` discriminates, and the
 //! object-safety pin.
 
-use arxia_core::ArxiaError;
+use arxia_core::{ArxiaError, StorageFault};
 use arxia_storage::conformance;
 use arxia_storage::{BatchOp, MemoryStorage, StorageBackend};
 
@@ -32,7 +32,11 @@ struct StagesThenFails {
 }
 
 fn fault() -> ArxiaError {
-    ArxiaError::Storage("simulated mid-batch fault".into())
+    ArxiaError::Storage {
+        fault: StorageFault::Backend {
+            detail: "simulated mid-batch fault".into(),
+        },
+    }
 }
 
 macro_rules! delegate_non_batch_methods {

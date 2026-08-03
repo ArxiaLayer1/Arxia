@@ -6,7 +6,7 @@ use crate::nonce_registry::{
     merge_nonce_registries, sync_nonces_before_l1, NonceConflict, NonceKey, NonceRegistry,
     SyncResult,
 };
-use arxia_core::{ArxiaError, SignatureFault};
+use arxia_core::{ArxiaError, KeyFault, SignatureFault};
 use arxia_lattice::block::Block;
 use arxia_lattice::validation::verify_block;
 
@@ -130,10 +130,19 @@ impl GossipNode {
             })?
             .try_into()
             .map_err(|_| ArxiaError::HashMismatch)?;
+        // Defense-in-depth: on the current call path this cannot
+        // fire — verify_block recomputes the hash first, and
+        // compute_hash already rejected a malformed account. Kept
+        // typed rather than unwrapped so a future reordering fails
+        // loudly into a meaningful fault.
         let account_bytes: [u8; 32] = hex::decode(&block.account)
-            .map_err(|e| ArxiaError::InvalidKey(e.to_string()))?
+            .map_err(|e| ArxiaError::InvalidKey {
+                fault: KeyFault::HexEncoding { source: e },
+            })?
             .try_into()
-            .map_err(|_| ArxiaError::InvalidKey("bad key length".into()))?;
+            .map_err(|v: Vec<u8>| ArxiaError::InvalidKey {
+                fault: KeyFault::Length { got: v.len() },
+            })?;
 
         let key = (account_bytes, block.nonce);
         match self.nonce_registry.get(&key) {

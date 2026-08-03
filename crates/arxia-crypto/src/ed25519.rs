@@ -38,9 +38,9 @@
 //! function before trusting the bytes. It rejects:
 //!
 //! - bytes that do not decompress to a Curve25519 point
-//!   (`InvalidKey("not a valid Ed25519 point")`)
+//!   (`InvalidKey { fault: KeyFault::NotOnCurve }`)
 //! - low-order points (the identity + 7 small-subgroup points)
-//!   (`InvalidKey("low-order Ed25519 public key (weak)")`)
+//!   (`InvalidKey { fault: KeyFault::WeakPoint }`)
 //!
 //! Without this gate, a DID can be constructed under a low-order
 //! pubkey; downstream verification would never succeed for that
@@ -51,7 +51,7 @@ use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::SysRng;
 
-use arxia_core::{AccountId, ArxiaError, SignatureBytes, SignatureFault};
+use arxia_core::{AccountId, ArxiaError, KeyFault, SignatureBytes, SignatureFault};
 
 /// Generate a new Ed25519 keypair.
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
@@ -87,7 +87,9 @@ pub fn verify(
     data: &[u8],
     signature: &SignatureBytes,
 ) -> Result<(), ArxiaError> {
-    let vk = VerifyingKey::from_bytes(pubkey).map_err(|e| ArxiaError::InvalidKey(e.to_string()))?;
+    let vk = VerifyingKey::from_bytes(pubkey).map_err(|_| ArxiaError::InvalidKey {
+        fault: KeyFault::NotOnCurve,
+    })?;
     let sig = Signature::from_bytes(signature);
     vk.verify_strict(data, &sig)
         .map_err(|_| ArxiaError::SignatureInvalid {
@@ -110,16 +112,17 @@ pub fn verify(
 ///
 /// # Errors
 ///
-/// Returns `Err(ArxiaError::InvalidKey(reason))`. The `reason`
-/// string distinguishes the two failure modes ("not on curve" vs.
-/// "low-order / weak").
+/// Returns `Err(ArxiaError::InvalidKey { fault })`. The fault
+/// discriminant distinguishes the two failure modes (not on curve
+/// vs. low-order / weak).
 pub fn validate_pubkey_strict(pubkey: &AccountId) -> Result<(), ArxiaError> {
-    let vk = VerifyingKey::from_bytes(pubkey)
-        .map_err(|e| ArxiaError::InvalidKey(format!("not a valid Ed25519 point: {e}")))?;
+    let vk = VerifyingKey::from_bytes(pubkey).map_err(|_| ArxiaError::InvalidKey {
+        fault: KeyFault::NotOnCurve,
+    })?;
     if vk.is_weak() {
-        return Err(ArxiaError::InvalidKey(
-            "low-order Ed25519 public key (weak / small-subgroup point)".to_string(),
-        ));
+        return Err(ArxiaError::InvalidKey {
+            fault: KeyFault::WeakPoint,
+        });
     }
     Ok(())
 }
@@ -340,7 +343,7 @@ mod tests {
         let result = validate_pubkey_strict(&[0u8; 32]);
         let err = result.expect_err("zero pubkey must be rejected");
         match err {
-            ArxiaError::InvalidKey(_) => {} // expected
+            ArxiaError::InvalidKey { .. } => {} // expected
             other => panic!("expected InvalidKey, got {:?}", other),
         }
     }
@@ -450,5 +453,44 @@ mod tests {
             assert_ne!(sk.to_bytes(), zero, "sk is all-zero (broken RNG?)");
             assert_ne!(vk.to_bytes(), zero, "vk is all-zero (broken RNG?)");
         }
+    }
+
+    /// R3 of the typed-error rework, key family: an encoding that is
+    /// not a curve point and a valid-but-weak point are different
+    /// signals (undecodable garbage vs. a deliberately chosen
+    /// small-subgroup key), and each surfaces under its own
+    /// discriminant. A change collapsing them fails one of these.
+    #[test]
+    fn off_curve_and_weak_keys_have_distinct_discriminants() {
+        // y = 2: (y^2-1)/(d*y^2+1) is a non-square in the field, so
+        // the encoding does not decompress to a curve point
+        // (verified empirically against dalek's from_bytes).
+        let mut off_curve = [0u8; 32];
+        off_curve[0] = 2;
+        assert!(matches!(
+            validate_pubkey_strict(&off_curve),
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::NotOnCurve
+            })
+        ));
+
+        // The identity element encoding: decodes fine, is_weak.
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert!(matches!(
+            validate_pubkey_strict(&identity),
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::WeakPoint
+            })
+        ));
+
+        // The verify() entry point maps the same undecodable input to
+        // the same discriminant — both construction sites pinned.
+        assert!(matches!(
+            verify(&off_curve, &[0x42u8; 32], &[0u8; 64]),
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::NotOnCurve
+            })
+        ));
     }
 }

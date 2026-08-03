@@ -19,20 +19,17 @@
 //! length error). Callers MUST handle the `Err` arm at compile time.
 
 use crate::block::{Block, BlockType};
-use arxia_core::{ArxiaError, SignatureFault, COMPACT_BLOCK_SIZE};
+use arxia_core::{ArxiaError, BlockField, SignatureFault, COMPACT_BLOCK_SIZE};
 
 /// Decode a hex string into a fixed-size 32-byte array. Loud failure
 /// on bad input: `Err(ArxiaError::HexDecode)` for non-hex,
-/// `Err(ArxiaError::InvalidKey)` for wrong length.
-fn hex_decode_32(field_name: &str, s: &str) -> Result<[u8; 32], ArxiaError> {
+/// `Err(ArxiaError::MalformedBlockField)` for wrong length.
+fn hex_decode_32(field: BlockField, s: &str) -> Result<[u8; 32], ArxiaError> {
     let v = hex::decode(s).map_err(ArxiaError::HexDecode)?;
     let len = v.len();
-    v.as_slice().try_into().map_err(|_| {
-        ArxiaError::InvalidKey(format!(
-            "{} must be 64 hex chars (32 bytes), got {} bytes",
-            field_name, len
-        ))
-    })
+    v.as_slice()
+        .try_into()
+        .map_err(|_| ArxiaError::MalformedBlockField { field, got: len })
 }
 
 /// Serialize a block to compact binary format (193 bytes).
@@ -60,7 +57,7 @@ pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
         BlockType::Revoke { .. } => buf.push(0x03),
     }
 
-    let account_bytes = hex_decode_32("account", &block.account)?;
+    let account_bytes = hex_decode_32(BlockField::Account, &block.account)?;
     buf.extend_from_slice(&account_bytes);
 
     if block.previous.is_empty() {
@@ -70,7 +67,7 @@ pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
         // sentinel.
         buf.extend_from_slice(&[0u8; 32]);
     } else {
-        let prev = hex_decode_32("previous", &block.previous)?;
+        let prev = hex_decode_32(BlockField::Previous, &block.previous)?;
         buf.extend_from_slice(&prev);
     }
 
@@ -88,15 +85,15 @@ pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
 
     match &block.block_type {
         BlockType::Send { destination, .. } => {
-            let d = hex_decode_32("destination", destination)?;
+            let d = hex_decode_32(BlockField::Destination, destination)?;
             buf.extend_from_slice(&d);
         }
         BlockType::Receive { source_hash } => {
-            let s = hex_decode_32("source_hash", source_hash)?;
+            let s = hex_decode_32(BlockField::SourceHash, source_hash)?;
             buf.extend_from_slice(&s);
         }
         BlockType::Revoke { credential_hash } => {
-            let r = hex_decode_32("credential_hash", credential_hash)?;
+            let r = hex_decode_32(BlockField::CredentialHash, credential_hash)?;
             buf.extend_from_slice(&r);
         }
         BlockType::Open { .. } => buf.extend_from_slice(&[0u8; 32]),
@@ -395,8 +392,14 @@ mod tests {
         block.account = "ab".repeat(8); // 16 chars = 8 bytes
         let result = to_compact_bytes(&block);
         assert!(
-            matches!(result, Err(ArxiaError::InvalidKey(_))),
-            "expected InvalidKey, got {:?}",
+            matches!(
+                result,
+                Err(ArxiaError::MalformedBlockField {
+                    field: BlockField::Account,
+                    got: 8
+                })
+            ),
+            "expected MalformedBlockField(account, 8), got {:?}",
             result
         );
     }
