@@ -8,7 +8,18 @@ license.workspace = true
 repository.workspace = true
 description = "Core types, constants, and error handling for the Arxia protocol"
 
+# Declared directly rather than workspace-inherited: a member cannot
+# turn off default features on an inherited dependency (cargo ignores
+# the override), and no_std requires exactly that. Versions match the
+# workspace pins.
 [dependencies]
-thiserror = { workspace = true }
-serde = { workspace = true }
-hex = { workspace = true }
+thiserror = { version = "2.0", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[features]
+# std is on by default; every current consumer builds unchanged. A
+# no_std consumer opts out with default-features = false and gets the
+# whole crate minus the wall clock (now_millis), which needs an OS.
+default = ["std"]
+std = ["thiserror/std", "serde/std", "hex/std"]

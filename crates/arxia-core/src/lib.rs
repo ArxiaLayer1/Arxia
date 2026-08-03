@@ -4,8 +4,14 @@
 //! `AccountId`, `Amount`, `Nonce`, `BlockHash`, `SignatureBytes`, and the
 //! unified `ArxiaError` enum.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+
+// String-carrying error payloads and hex encoding need a heap; the
+// crate targets no_std + alloc, not heapless. Explicit even under std
+// so the same paths compile identically in both configurations.
+extern crate alloc;
 
 pub mod constants;
 pub mod error;
@@ -13,8 +19,8 @@ pub mod types;
 
 pub use constants::*;
 pub use error::{
-    ArxiaError, BlockField, DidFault, GenesisRule, KeyFault, SerializedItem, SignatureFault,
-    StorageFault, TransportFault,
+    ArxiaError, BlockField, DidFault, GenesisRule, HexFaultKind, KeyFault, SerializedItem,
+    SignatureFault, StorageFault, TransportFault,
 };
 pub use types::*;
 
