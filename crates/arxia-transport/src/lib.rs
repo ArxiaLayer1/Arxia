@@ -4,7 +4,7 @@
 //! implementation for testing. Production transports (LoRa, BLE,
 //! SMS, Satellite) will implement the same trait.
 //!
-//! # Authenticated `from` (HIGH-012, commit 045)
+//! # Authenticated `from` (HIGH-012)
 //!
 //! [`TransportMessage`] carries a `from: String` field that is
 //! pre-fix purely informational. A peer can set

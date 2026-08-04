@@ -1,6 +1,6 @@
 //! Fragmentation / reassembly with signed per-fragment headers.
 //!
-//! # HIGH-013 (commit 089): reassembly contract
+//! # HIGH-013: reassembly contract
 //!
 //! Real transports (LoRa, BLE) fragment payloads larger than the
 //! link MTU. A receiver that does not reassemble cannot
@@ -69,7 +69,7 @@ use std::collections::{HashMap, VecDeque};
 /// Maximum number of concurrent in-flight messages per peer
 /// before the reassembler starts evicting the oldest.
 ///
-/// HIGH-013 (commit 089): defends against a peer that opens
+/// HIGH-013: defends against a peer that opens
 /// thousands of distinct `message_id` values without ever
 /// completing any of them (memory amplification). Realistic
 /// LoRa link rates rarely exceed 4 in-flight messages per peer
@@ -369,7 +369,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-013 (commit 089) — fragment / reassembly contract.
+    // HIGH-013 — fragment / reassembly contract.
     // ============================================================
 
     #[test]

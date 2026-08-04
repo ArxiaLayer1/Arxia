@@ -13,7 +13,7 @@
 //! and the block would "verify" but represent a different semantic
 //! object than what was intended. Silent data corruption.
 //!
-//! Post-fix (commit 032), [`to_compact_bytes`] returns
+//! Post-fix, [`to_compact_bytes`] returns
 //! `Result<Vec<u8>, ArxiaError>` and propagates every `hex::decode`
 //! failure as `ArxiaError::HexDecode` (or the structurally-equivalent
 //! length error). Callers MUST handle the `Err` arm at compile time.
@@ -43,7 +43,7 @@ fn hex_decode_32(field: BlockField, s: &str) -> Result<[u8; 32], ArxiaError> {
 /// Returns `Err(ArxiaError::InvalidKey)` if any hex field decodes
 /// to other than exactly 32 bytes.
 ///
-/// HIGH-004 (commit 032): this function used to silently substitute
+/// HIGH-004: this function used to silently substitute
 /// `[0u8; 32]` on any hex-decode failure, turning a structural error
 /// (malformed upstream input) into wire-level data corruption that
 /// downstream `verify_block` could not detect. The current
@@ -109,7 +109,7 @@ pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
         // missing/wrong-length signature is caught by `verify_block`
         // downstream.
         //
-        // LOW-005 (commit 076): callers that want to fail loudly
+        // LOW-005: callers that want to fail loudly
         // on a wrong-length signature instead of silently padding
         // can use [`to_compact_bytes_strict`]. Both forms produce
         // identical 193-byte output for canonical inputs.
@@ -121,7 +121,7 @@ pub fn to_compact_bytes(block: &Block) -> Result<Vec<u8>, ArxiaError> {
 /// Strict variant of [`to_compact_bytes`] that returns an error
 /// instead of silently zero-padding a wrong-length signature.
 ///
-/// LOW-005 (commit 076): the lenient form pads with `[0u8; 64]`
+/// LOW-005: the lenient form pads with `[0u8; 64]`
 /// so the wire format is always 193 bytes ; downstream
 /// `verify_block` catches the all-zero signature. Sensitive
 /// callers (e.g. those serialising blocks for long-term archival
@@ -158,7 +158,7 @@ pub fn from_compact_bytes(data: &[u8]) -> Result<Block, ArxiaError> {
     } else {
         hex::encode(prev_raw)
     };
-    // MED-003 (commit 051): typed-error on slice-to-array conversion.
+    // MED-003: typed-error on slice-to-array conversion.
     // The length check above (`data.len() < COMPACT_BLOCK_SIZE`)
     // makes these `try_into` failures unreachable at runtime
     // today. Defense-in-depth: if a future refactor weakens the
@@ -488,7 +488,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-003 (commit 051) — from_compact_bytes typed-error
+    // MED-003 — from_compact_bytes typed-error
     // on slice-to-array conversion. The length-check at
     // function entry makes these conversions unreachable in
     // practice; the typed error is a defense-in-depth against
@@ -555,7 +555,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-005 (commit 076) — to_compact_bytes_strict.
+    // LOW-005 — to_compact_bytes_strict.
     //
     // The lenient `to_compact_bytes` zero-pads a wrong-length
     // signature so the wire format is always 193 bytes. Strict

@@ -1,6 +1,6 @@
 //! Token locking contract for vesting and staking.
 //!
-//! # Linear vesting with cliff (HIGH-022, commit 047)
+//! # Linear vesting with cliff (HIGH-022)
 //!
 //! [`VestingSchedule`] implements the canonical "cliff + linear"
 //! token-vesting pattern (e.g. the whitepaper's "6 mo cliff + 24
@@ -251,7 +251,7 @@ mod tests {
     }
 
     // ============================================================
-    // VestingSchedule — HIGH-022 (commit 047) — linear vesting
+    // VestingSchedule — HIGH-022 — linear vesting
     // with cliff. The whitepaper's canonical "6mo cliff + 24mo
     // linear" pattern.
     //

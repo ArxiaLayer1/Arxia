@@ -14,14 +14,14 @@
 //!
 //! Caps:
 //!
-//! - [`MAX_BLOCK_ANNOUNCE_BYTES`] = `193 × 64` = `12_352` bytes (HIGH-008
-//!   closed in commit 027). 64 compact blocks per announce is the
-//!   batch ceiling — larger announces are gossip-layer abuse, not
+//! - [`MAX_BLOCK_ANNOUNCE_BYTES`] = `193 × 64` = `12_352` bytes
+//!   (HIGH-008). 64 compact blocks per announce is the batch
+//!   ceiling — larger announces are gossip-layer abuse, not
 //!   protocol traffic.
-//! - [`MAX_NONCE_SYNC_RESPONSE_ENTRIES`] = `10_000` entries (HIGH-009
-//!   closed in commit 028). Aligned with
+//! - [`MAX_NONCE_SYNC_RESPONSE_ENTRIES`] = `10_000` entries
+//!   (HIGH-009). Aligned with
 //!   [`crate::MAX_NONCE_REGISTRY_ENTRIES`] (the receiver's bounded
-//!   local registry from commit 020): a peer cannot push more
+//!   local registry): a peer cannot push more
 //!   `NonceSyncResponse` entries than the receiver can store.
 //!   Each entry is `([u8; 32], u64, [u8; 32])` = 72 B; 10 000
 //!   entries ≈ 720 KB worst-case bytes-on-wire.
@@ -41,7 +41,7 @@ pub const MAX_BLOCK_ANNOUNCE_BYTES: usize = 193 * 64;
 
 /// Maximum initial value of [`GossipMessage::BlockAnnounce::hops`].
 ///
-/// MED-008 (commit 056) — pre-fix `hops` was caller-controlled
+/// MED-008 — pre-fix `hops` was caller-controlled
 /// with no upper bound; a block could circulate forever as
 /// `hops = 255`. The cap rejects oversized initial values and
 /// pairs with [`GossipMessage::decrement_hops_for_relay`]
@@ -54,7 +54,7 @@ pub const MAX_BLOCK_ANNOUNCE_HOPS: u8 = 16;
 
 /// Maximum number of entries in a [`GossipMessage::NonceSyncResponse::entries`]
 /// payload. Aligned with [`crate::MAX_NONCE_REGISTRY_ENTRIES`] (the
-/// receiver's bounded local registry, commit 020): a peer cannot
+/// receiver's bounded local registry): a peer cannot
 /// push more entries in one `NonceSyncResponse` than the receiver
 /// can store anyway.
 ///
@@ -196,7 +196,7 @@ impl GossipMessage {
     /// Decrement the `hops` field on a `BlockAnnounce` and report
     /// whether the message can still be forwarded.
     ///
-    /// MED-008 (commit 056) — relayer-side TTL helper. The
+    /// MED-008 — relayer-side TTL helper. The
     /// canonical relayer flow:
     ///
     /// ```text
@@ -296,8 +296,8 @@ mod tests {
         };
         assert!(m1.validate().is_ok());
 
-        // NonceSyncResponse: well-below the 10 000-entry cap from
-        // commit 028 passes without issue.
+        // NonceSyncResponse: well below the 10 000-entry HIGH-009
+        // cap, passes without issue.
         let m2 = GossipMessage::NonceSyncResponse {
             entries: vec![([0u8; 32], 0, [0u8; 32]); 100],
         };
@@ -396,7 +396,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-008 (commit 056) — BlockAnnounce hops cap +
+    // MED-008 — BlockAnnounce hops cap +
     // decrement-on-relay TTL helper.
     // ============================================================
 

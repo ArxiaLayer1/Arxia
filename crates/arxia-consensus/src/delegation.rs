@@ -1,6 +1,6 @@
 //! Stake delegation to representatives.
 //!
-//! # HIGH-007 (commit 088): delegation as a DAG
+//! # HIGH-007: delegation as a DAG
 //!
 //! The pre-fix module only computed [`total_delegated_stake`].
 //! The audit (HIGH-007):
@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 /// time so a malicious peer cannot DoS the validator with a
 /// pathologically deep chain.
 ///
-/// HIGH-007 (commit 088): conservative value. Realistic
+/// HIGH-007: conservative value. Realistic
 /// delegation chains in practice are 1-2 hops (A delegates to
 /// B, B is a registered validator). 8 leaves room for nested
 /// delegation pools while still bounding the DFS cost.
@@ -128,7 +128,7 @@ pub struct Delegation {
 
 /// A signed revocation of a delegation edge.
 ///
-/// HIGH-007 (commit 088): revocation is an explicit signed
+/// HIGH-007: revocation is an explicit signed
 /// operation. The delegator signs the canonical bytes
 /// (DELEGATION_REVOCATION_DOMAIN || delegator_pubkey ||
 /// representative_pubkey || nonce_le) under their Ed25519 key
@@ -186,7 +186,7 @@ impl Revocation {
 /// Immutable snapshot of the per-representative stake totals at
 /// a moment in time.
 ///
-/// HIGH-007 (commit 088): captured by
+/// HIGH-007: captured by
 /// [`DelegationGraph::snapshot`] at vote time. Subsequent graph
 /// mutations do NOT affect the snapshot ; the consensus layer
 /// uses the snapshot to compute stake-weighted finality without
@@ -273,7 +273,7 @@ impl DelegationGraph {
     /// DFS from `start` ; if we reach `target` within `max_depth`
     /// hops, return CycleDetected. Otherwise Ok.
     ///
-    /// HIGH-007 (commit 088): the depth bound is
+    /// HIGH-007: the depth bound is
     /// [`MAX_DELEGATION_DEPTH`] ; if the chain is deeper than
     /// that, we fail with `DepthExceeded` (defense-in-depth ;
     /// realistic chains are 1-2 hops).
@@ -403,7 +403,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-007 (commit 088) — DelegationGraph DAG semantics:
+    // HIGH-007 — DelegationGraph DAG semantics:
     // self-rejection, cycle detection, signed revocation,
     // snapshot semantics.
     // ============================================================

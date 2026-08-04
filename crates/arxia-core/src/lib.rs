@@ -25,7 +25,7 @@ pub use error::{
 pub use types::*;
 
 // ============================================================
-// LOW-014 (commit 084) — workspace deny.toml / clippy.toml
+// LOW-014 — workspace deny.toml / clippy.toml
 // pinned policies. The structural tests below read the
 // workspace-level config files via `include_str!` and assert
 // the audit-acknowledged baseline. Any future weakening of
@@ -114,7 +114,7 @@ mod cfg_pin_tests {
     }
 
     // ============================================================
-    // LOW-015 (commit 086) — workspace dependency pinning audit.
+    // LOW-015 — workspace dependency pinning audit.
     //
     // Every entry in `[workspace.dependencies]` MUST be
     // `major.minor` pinned. No `"*"` wildcards, no floating
@@ -161,7 +161,7 @@ mod cfg_pin_tests {
 
     #[test]
     fn test_workspace_critical_deps_have_minor_pin() {
-        // The 5 deps that the audit (commit 086) explicitly
+        // The 5 deps that the audit explicitly
         // upgraded from major-only to major.minor must keep
         // the minor pin. Pre-fix: `"1"` ; post-fix: `"1.0"`
         // (or higher minor). A regression that drops the

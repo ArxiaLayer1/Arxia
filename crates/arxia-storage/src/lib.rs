@@ -1,6 +1,6 @@
 //! Storage backends for Arxia.
 //!
-//! # Delete signals existence (HIGH-021, commit 039)
+//! # Delete signals existence (HIGH-021)
 //!
 //! [`StorageBackend::delete`] returns `Result<bool, ArxiaError>`,
 //! where `Ok(true)` means "the key existed and was removed" and
@@ -19,7 +19,7 @@
 //! `.delete(...).map(|_| ())`. Callers that DO care now have a
 //! typed signal at the trust boundary.
 //!
-//! # Concurrent access (MED-020, commit 071)
+//! # Concurrent access (MED-020)
 //!
 //! [`MemoryStorage`] takes `&mut self` on mutating methods and is
 //! NOT safe to share across threads — Rust's borrow checker will
@@ -45,7 +45,7 @@
 //! callers (it remains the default and avoids the lock-acquisition
 //! cost on the hot path).
 //!
-//! # Transactional writes (HIGH-020, commit 090)
+//! # Transactional writes (HIGH-020)
 //!
 //! [`StorageBackend`] is a single-op API: each `put` / `delete`
 //! lands immediately. The audit (HIGH-020):
@@ -283,7 +283,7 @@ impl StorageBackend for MemoryStorage {
     }
 }
 
-/// HIGH-020 (commit 090): staging op for the transaction's side
+/// HIGH-020: staging op for the transaction's side
 /// buffer. `Put(value)` carries the new value ; `Delete` marks
 /// the key for removal at commit time.
 #[derive(Debug, Clone)]
@@ -294,7 +294,7 @@ enum StagedOp {
 
 /// Transactional write handle on a [`MemoryStorage`].
 ///
-/// HIGH-020 (commit 090): writes go into a staging buffer
+/// HIGH-020: writes go into a staging buffer
 /// while the underlying store is untouched. [`Self::commit`]
 /// applies all staged ops atomically (single mutable borrow on
 /// the store) ; [`Self::rollback`] (or `drop`) discards the
@@ -380,7 +380,7 @@ impl MemoryTransaction<'_> {
 }
 
 impl MemoryStorage {
-    /// HIGH-020 (commit 090): begin a transaction.
+    /// HIGH-020: begin a transaction.
     ///
     /// Holds an exclusive mutable borrow on `self` until the
     /// returned [`MemoryTransaction`] is dropped or committed.
@@ -394,7 +394,7 @@ impl MemoryStorage {
         }
     }
 
-    /// HIGH-020 (commit 090): convenience wrapper for the
+    /// HIGH-020: convenience wrapper for the
     /// "many puts, all-or-nothing" pattern.
     ///
     /// Begins a transaction, applies every `(key, value)` pair
@@ -417,7 +417,7 @@ impl MemoryStorage {
 
 /// Thread-safe in-memory storage backend.
 ///
-/// MED-020 (commit 071): all mutating methods take `&self` and
+/// MED-020: all mutating methods take `&self` and
 /// synchronise internally via [`std::sync::Mutex`]. Designed for
 /// `Arc<ConcurrentMemoryStorage>` sharing across threads ; the
 /// `Arc` provides the shared ownership, the internal `Mutex`
@@ -524,7 +524,7 @@ impl Default for ConcurrentMemoryStorage {
     }
 }
 
-/// LOW-011 (commit 082): Blake3-checksummed value envelope.
+/// LOW-011: Blake3-checksummed value envelope.
 ///
 /// `wrap_with_checksum(value)` prepends a 32-byte Blake3 hash to
 /// the value bytes so a later `unwrap_with_checksum` can detect
@@ -544,7 +544,7 @@ pub fn wrap_with_checksum(value: &[u8]) -> Vec<u8> {
     out
 }
 
-/// LOW-011 (commit 082): unwrap and verify a checksummed value
+/// LOW-011: unwrap and verify a checksummed value
 /// envelope produced by [`wrap_with_checksum`].
 ///
 /// On success returns the inner value bytes (not the checksum).
@@ -610,7 +610,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-021 (commit 039) — delete returns Ok(true) iff the key
+    // HIGH-021 — delete returns Ok(true) iff the key
     // existed; Ok(false) iff it was already absent.
     // ============================================================
 
@@ -681,7 +681,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-020 (commit 071) — ConcurrentMemoryStorage thread-safety.
+    // MED-020 — ConcurrentMemoryStorage thread-safety.
     // The pre-fix MemoryStorage takes &mut self and is unshare-
     // able. This new type takes &self, locks internally, and is
     // safe to share via Arc across threads.
@@ -804,7 +804,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-011 (commit 082) — Blake3 round-trip checksum.
+    // LOW-011 — Blake3 round-trip checksum.
     //
     // Opt-in `wrap_with_checksum` / `unwrap_with_checksum`
     // helpers. Wire format: `[32-byte blake3(value)][value_bytes]`.
@@ -893,7 +893,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-020 (commit 090) — MemoryTransaction begin/commit/
+    // HIGH-020 — MemoryTransaction begin/commit/
     // rollback semantics + atomic_put_batch convenience.
     // ============================================================
 

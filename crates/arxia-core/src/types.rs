@@ -48,7 +48,7 @@ impl BlockTypeTag {
 
 /// Returns current time as milliseconds since UNIX epoch.
 ///
-/// # No-panic contract (HIGH-026, commit 043)
+/// # No-panic contract (HIGH-026)
 ///
 /// Pre-fix this function used `.expect("system clock before UNIX
 /// epoch")`, which DoSed any node whose clock read pre-1970 — most
@@ -117,7 +117,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-026 (commit 043) — no-panic contract on pre-epoch RTC.
+    // HIGH-026 — no-panic contract on pre-epoch RTC.
     // The pure helper `millis_since_epoch_or_zero` is exercised
     // with synthesized SystemTime values around UNIX_EPOCH so the
     // test runs identically on any host clock state.
@@ -182,7 +182,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-001 (commit 072) — BlockTypeTag::from_byte exhaustive
+    // LOW-001 — BlockTypeTag::from_byte exhaustive
     // intermediate-byte rejection. The pre-fix suite covered
     // 0x00–0x03 (positive) and 0xFF (single negative). Bytes
     // 0x04–0xFE — 251 distinct invalid values — were not

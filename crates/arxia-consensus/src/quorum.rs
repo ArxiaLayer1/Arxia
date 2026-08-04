@@ -18,7 +18,7 @@ pub struct QuorumResult {
 /// Checks whether quorum requirements are met.
 /// Requires >= 2/3 representatives AND >= 20% stake.
 ///
-/// MED-004 (commit 062): integer arithmetic for both
+/// MED-004: integer arithmetic for both
 /// thresholds. Pre-fix the stake check used `f64` division
 /// (`voted_stake as f64 / total_supply as f64 >= 0.20`),
 /// which had rounding edges at exact 20% boundaries.
@@ -78,7 +78,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-004 (commit 062) — integer threshold for stake quorum
+    // MED-004 — integer threshold for stake quorum
     // (pre-fix used f64 division). Pin the exact-boundary
     // behaviour and the no-overflow contract.
     // ============================================================

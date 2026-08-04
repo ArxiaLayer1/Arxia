@@ -1,6 +1,6 @@
 # clippy configuration for the Arxia workspace.
 #
-# LOW-014 (commit 084): reviewed and pinned. The MSRV below
+# LOW-014: reviewed and pinned. The MSRV below
 # matches `rust-toolchain.toml` and the workspace Cargo.toml ;
 # bumping it requires updating both files in lock-step.
 

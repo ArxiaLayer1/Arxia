@@ -57,8 +57,8 @@ pub struct RejectedReceive {
 
 /// Info on a `BlockType::Open` block that was rejected because it
 /// claimed a non-genesis nonce. Genesis MUST be `nonce == 1`
-/// (per HIGH-003 / commit 031); reconciliation refuses to credit
-/// any `Open` at a different nonce. MED-016 (commit 058) defense.
+/// (per HIGH-003); reconciliation refuses to credit
+/// any `Open` at a different nonce. MED-016 defense.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedGenesis {
     /// Hex-encoded account public key.
@@ -83,7 +83,7 @@ pub struct ReconciliationReport {
     /// therefore did NOT credit the receiver.
     pub rejected_receives: Vec<RejectedReceive>,
     /// `Open` blocks that claimed a non-genesis nonce and were
-    /// therefore not applied. MED-016 (commit 058).
+    /// therefore not applied. MED-016.
     pub rejected_genesis: Vec<RejectedGenesis>,
 }
 
@@ -166,11 +166,11 @@ pub fn reconcile_partitions(
         let block = winners.get(&key).expect("winner recorded per key");
         match &block.block_type {
             BlockType::Open { initial_balance } => {
-                // MED-016 (commit 058): genesis Open blocks MUST
+                // MED-016: genesis Open blocks MUST
                 // be at nonce == 1. A forged Open at any other
                 // nonce (notably 0) does NOT credit the account.
-                // Parallels HIGH-003 / commit 031 which enforces
-                // the same rule at `Ledger::add_block`.
+                // Parallels HIGH-003, which enforces the same
+                // rule at `Ledger::add_block`.
                 if block.nonce != 1 {
                     rejected_genesis.push(RejectedGenesis {
                         account: block.account.clone(),
@@ -719,7 +719,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-016 (commit 058) — reconcile_partitions rejects Open
+    // MED-016 — reconcile_partitions rejects Open
     // blocks at non-genesis nonces. Genesis is nonce==1; any
     // other nonce on an Open is a forged block and MUST NOT
     // credit the account.
@@ -794,9 +794,9 @@ mod tests {
     }
 
     // ============================================================
-    // MED-017 (commit 059) — RECEIVE balance regression pinned
+    // MED-017 — RECEIVE balance regression pinned
     // by explicit tests. Credit comes from source.amount, not
-    // block.balance. Inheritance-closed by commit 011's design.
+    // block.balance; the design closes the inheritance path.
     // ============================================================
 
     fn forge_receive_with_arbitrary_balance(
@@ -898,9 +898,9 @@ mod tests {
     }
 
     // ============================================================
-    // MED-022 (commit 069) — post-007 reconciliation walk-through.
+    // MED-022 — post-007 reconciliation walk-through.
     //
-    // HIGH-007 (commit 007) introduced the conflict-resolution
+    // HIGH-007 introduced the conflict-resolution
     // path that picks a single winner per (account, nonce)
     // group via deterministic hash-tiebreak, and then rejects
     // RECEIVEs that referenced the losing SEND. The pre-fix
@@ -927,8 +927,7 @@ mod tests {
         // Both alice-sends share (account=alice, nonce=2) — exactly
         // the conflict shape HIGH-007 resolves. Hash-tiebreak picks
         // a deterministic winner ; the loser's RECEIVE on the other
-        // side ends up in `rejected_receives` (commit 007 +
-        // commit 011 inheritance).
+        // side ends up in `rejected_receives`.
         //
         // Expected end state:
         // - alice.balance = 1_000_000 − 600_000 = 400_000

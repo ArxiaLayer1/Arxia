@@ -38,7 +38,7 @@ repository = "https://github.com/arxialayer1/arxia"
 homepage = "https://arxia.one"
 description = "Layer 1 blockchain for offline-first mesh consensus"
 
-# LOW-015 (commit 086): every dependency is `major.minor` pinned.
+# LOW-015: every dependency is `major.minor` pinned.
 # Rationale: a bare `"1"` allows cargo to pick any 1.x.y, which
 # can drift through unannounced API additions. `"1.0"` still
 # allows compatible upgrades within 1.x but documents the

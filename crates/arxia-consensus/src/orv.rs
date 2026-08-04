@@ -4,7 +4,7 @@ use crate::vote::VoteORV;
 
 /// Minimum stake denominator for representative eligibility.
 ///
-/// MED-005 (commit 063): integer denominator replacing the old
+/// MED-005: integer denominator replacing the old
 /// `f64` constant `0.001`. `min_stake = total_supply / 1000`
 /// is the integer-equivalent of "≥ 0.1 % of total supply" and
 /// avoids the boundary indeterminism of `f64` multiplication.
@@ -12,7 +12,7 @@ pub const MIN_REPRESENTATIVE_STAKE_DENOM: u64 = 1_000;
 
 /// Audit record for vote collection.
 ///
-/// MED-005 (commit 063): pre-fix `collect_votes` returned only
+/// MED-005: pre-fix `collect_votes` returned only
 /// the accepted set ; ineligible votes were silently dropped.
 /// The audit form returns both buckets and the threshold so a
 /// caller (or downstream observability) can tell *why* a vote
@@ -87,7 +87,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-005 (commit 063) — collect_votes_with_audit
+    // MED-005 — collect_votes_with_audit
     // (pre-fix dropped ineligible votes silently). Pin the
     // partition (accepted + filtered = input) and the integer
     // threshold.

@@ -4,7 +4,7 @@
 //! LoRa (SX1276) and BLE hardware. The 24 pre-gossip PoC v0.4.0 tests
 //! run on ESP32/QEMU. Gossip tests (25-34) are x86_64 only for now.
 //!
-//! # Allocator strategy (LOW-013, commit 085)
+//! # Allocator strategy (LOW-013)
 //!
 //! ESP32 has 520 KiB of internal SRAM split into multiple regions, of
 //! which roughly 320 KiB is usable as heap on a typical esp-idf
@@ -36,7 +36,7 @@
 //!    1 MiB, defined in `arxia_proto`) which itself sits well
 //!    below the 320 KiB heap ceiling.
 //!
-//! # Stack-usage budget (LOW-013, commit 085)
+//! # Stack-usage budget (LOW-013)
 //!
 //! ESP32 default thread stack is 3.5 KiB (FreeRTOS via esp-idf), and
 //! the Arxia main task is configured at **8 KiB** in the production
@@ -89,7 +89,7 @@ pub const ESP32_VERSION: &str = "0.1.0-stub";
 /// Documented main-task stack budget on `xtensa-esp32-espidf`, in
 /// bytes.
 ///
-/// LOW-013 (commit 085): pinned at 8 KiB. The deepest measured call
+/// LOW-013: pinned at 8 KiB. The deepest measured call
 /// chain (`reconcile_partitions`) is ~3.9 KiB ; the budget gives a
 /// 2× safety margin. Production `sdkconfig.defaults` MUST configure
 /// the FreeRTOS task stack at >= this value. Bumping the budget
@@ -101,7 +101,7 @@ pub const MAIN_TASK_STACK_BUDGET_BYTES: usize = 8 * 1024;
 /// Documented worst-case stack usage of the deepest measured Arxia
 /// call chain (`arxia_crdt::reconcile_partitions`), in bytes.
 ///
-/// LOW-013 (commit 085): measured via `cargo call-stack` on
+/// LOW-013: measured via `cargo call-stack` on
 /// `xtensa-esp32-espidf`, Rust 1.85.0, opt-level=z. Updating this
 /// constant on a code change is a tripwire — any drift > 10 %
 /// triggers a CI gate to re-measure and re-pin the budget.
@@ -112,7 +112,7 @@ mod tests {
     use super::*;
 
     // ============================================================
-    // LOW-013 (commit 085) — esp32 allocator strategy + stack
+    // LOW-013 — esp32 allocator strategy + stack
     // budget pins. Tests are documentation regression guards ;
     // they run on x86_64 (where this crate ALSO compiles, for
     // host-side build integrity) and do not exercise the actual

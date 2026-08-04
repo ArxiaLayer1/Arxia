@@ -1,6 +1,6 @@
 //! Arxia full node.
 //!
-//! # HIGH-027 (commit 087): security-interfaces gating
+//! # HIGH-027: security-interfaces gating
 //!
 //! This binary is currently a STUB. The production implementation
 //! is gated by `docs/SECURITY_INTERFACES.md` — every subsystem
@@ -14,7 +14,7 @@
 
 use tracing::{info, warn};
 
-/// HIGH-027 (commit 087) gate: relative path to the security
+/// HIGH-027 gate: relative path to the security
 /// interfaces doc. Pinned by the structural test below so a
 /// future move of the doc surfaces as a CI failure rather than
 /// a silent dead-link in the startup banner.
@@ -42,7 +42,7 @@ mod tests {
     const SECURITY_INTERFACES_DOC: &str = include_str!("../../../docs/SECURITY_INTERFACES.md");
 
     // ============================================================
-    // HIGH-027 (commit 087) — security-interfaces doc structural
+    // HIGH-027 — security-interfaces doc structural
     // pins. The doc is the gating contract for the production
     // implementation ; these tests verify each required section
     // is present and the doc path constant is consistent.

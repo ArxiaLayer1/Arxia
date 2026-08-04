@@ -1,6 +1,6 @@
 //! Block and BlockType definitions for the Arxia Block Lattice.
 //!
-//! # `compute_hash` returns Result (MED-001, commit 050)
+//! # `compute_hash` returns Result (MED-001)
 //!
 //! Pre-fix [`Block::compute_hash`] used
 //! `serde_json::to_string(block_type).expect("BlockType serialization")`

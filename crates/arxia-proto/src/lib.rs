@@ -1,6 +1,6 @@
 //! Protobuf definitions for the Arxia wire protocol.
 //!
-//! # Pre-decode validation (HIGH-010, commit 040)
+//! # Pre-decode validation (HIGH-010)
 //!
 //! Wire bytes that arrive on a transport (LoRa / BLE / SMS / TCP /
 //! satellite) MUST be validated against
@@ -20,7 +20,7 @@
 //! `MAX_TRANSPORT_FRAME_BYTES` = 1 MiB (1 048 576 bytes), aligned
 //! with the audit's batch-frame ceiling.
 //!
-//! # Post-decode oneof gate (HIGH-011, commit 041)
+//! # Post-decode oneof gate (HIGH-011)
 //!
 //! Prost's default decode of a message with a `oneof` field
 //! **silently drops** unknown field numbers — the parsed message
@@ -45,7 +45,7 @@
 //! boundary. Every transport binding (`arxia-transport`, future
 //! LoRa / BLE / SMS adapters) inherits both checks transparently.
 
-//! # Protoc availability flag (LOW-008, commit 080)
+//! # Protoc availability flag (LOW-008)
 //!
 //! `build.rs` checks for `protoc` and either compiles the
 //! `.proto` definitions normally OR writes a stub
@@ -72,7 +72,7 @@ pub use validation::{
 
 /// Whether the `protoc`-stub fallback was active at build time.
 ///
-/// LOW-008 (commit 080): `true` means `protoc` was missing and
+/// LOW-008: `true` means `protoc` was missing and
 /// the generated protobuf module is a stub ; `false` means the
 /// real types are available. Callers that depend on real
 /// prost-generated types should assert `!PROTO_STUB_ACTIVE` (or

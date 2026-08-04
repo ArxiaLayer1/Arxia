@@ -2,10 +2,9 @@
 //! bytes.
 //!
 //! - HIGH-010 cap: [`validate_transport_frame_bytes`] —
-//!   pre-decode size guard (commit 040).
+//!   pre-decode size guard.
 //! - HIGH-011 oneof gate: [`require_envelope_payload`] —
-//!   post-decode "unknown variant must reject" guard
-//!   (commit 041).
+//!   post-decode "unknown variant must reject" guard.
 //!
 //! See the crate-level docstring for the protocol-level
 //! rationale.
@@ -13,7 +12,7 @@
 /// Maximum nesting depth a protobuf-encoded message is allowed to
 /// reach when decoded via a depth-aware consumer.
 ///
-/// MED-012 (commit 070): pre-emptive guard. The current `.proto`
+/// MED-012: pre-emptive guard. The current `.proto`
 /// files do not contain recursive message structures, but the
 /// wire protocol permits them via `Any`-style extensibility ; a
 /// future definition that introduces recursion (deliberately or
@@ -39,7 +38,7 @@ pub const MAX_PROTO_DECODE_DEPTH: usize = 64;
 ///
 /// 1 MiB. Aligned with the audit's batch-frame ceiling. The cap is
 /// defensive: even a perfectly-formed batch frame (e.g.
-/// `NonceSyncResponse` near its 10 000-entry cap from commit 028,
+/// `NonceSyncResponse` near its 10 000-entry HIGH-009 cap,
 /// ~720 KB) fits comfortably; an attacker sending a 4 GB payload is
 /// rejected without any prost allocation.
 ///
@@ -71,7 +70,7 @@ pub enum ProtoError {
         /// missing its `oneof` variant (e.g. `"GossipEnvelope"`).
         envelope_kind: &'static str,
     },
-    /// MED-012 (commit 070): the depth-aware consumer detected
+    /// MED-012: the depth-aware consumer detected
     /// a nested message structure exceeding
     /// [`MAX_PROTO_DECODE_DEPTH`]. Pre-emptive guard against
     /// stack-overflow attacks via deeply-nested messages.
@@ -170,7 +169,7 @@ pub fn require_envelope_payload<'a, T>(
     payload.ok_or(ProtoError::EnvelopePayloadEmpty { envelope_kind })
 }
 
-/// MED-012 (commit 070): assert that a depth-aware consumer's
+/// MED-012: assert that a depth-aware consumer's
 /// decode-depth counter has not exceeded [`MAX_PROTO_DECODE_DEPTH`].
 ///
 /// Returns `Ok(())` if `depth <= MAX_PROTO_DECODE_DEPTH`, else
@@ -205,7 +204,7 @@ mod tests {
     use super::*;
 
     // ============================================================
-    // HIGH-010 (commit 040) — TransportFrame size cap.
+    // HIGH-010 — TransportFrame size cap.
     // ============================================================
 
     #[test]
@@ -272,7 +271,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-011 (commit 041) — require_envelope_payload gate.
+    // HIGH-011 — require_envelope_payload gate.
     // Generic over inner variant type so it can be reused for
     // any oneof-bearing prost message.
     // ============================================================
@@ -364,7 +363,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-012 (commit 070) — proto decode-depth cap.
+    // MED-012 — proto decode-depth cap.
     //
     // Pre-emptive guard. Current `.proto` files don't have
     // recursion, so there is no in-tree caller yet ; these
@@ -454,7 +453,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-008 (commit 080) — proto stub gating.
+    // LOW-008 — proto stub gating.
     //
     // build.rs sets one of `arxia_proto_real` (protoc found) or
     // `arxia_proto_stub` (protoc missing, stub used). The
