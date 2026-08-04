@@ -19,8 +19,9 @@ this document did not reflect:
   public key under the domain prefix `arxia-gossip-msg-v1`. Forging
   a message at the gossip layer requires forging a signature.
 
-Both surfaces are described in this document; the audit context and
-attack vectors are summarized in `PHASE1_AUDIT_REPORT.md`.
+Both surfaces are described in this document; the attack vectors
+were catalogued during the security review (see `../SECURITY_REVIEW.md`
+for what the review identifiers reference).
 
 ---
 

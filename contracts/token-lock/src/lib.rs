@@ -25,7 +25,8 @@
 //! are useful and neither is a strict generalization of the
 //! other.
 //!
-//! Refs: PHASE1_AUDIT_REPORT.md HIGH-022.
+//! Refs: HIGH-022 (see docs/SECURITY_REVIEW.md for what review
+//! identifiers reference).
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

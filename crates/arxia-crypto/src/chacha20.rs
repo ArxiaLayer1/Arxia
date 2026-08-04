@@ -8,7 +8,7 @@
 //! never touch their inputs.
 //!
 //! Pre-fix these functions were panic-on-call stubs (the standard
-//! `todo` macro) — see CRIT-002 in `PHASE1_AUDIT_REPORT`. A caller
+//! `todo` macro) — CRIT-002 in the security review. A caller
 //! who force-routed a payload onto an encrypted path could crash the
 //! process. Replacing the panic with an explicit `Err(Unimplemented)`
 //! surfaces the unimplemented state to the type system, so downstream

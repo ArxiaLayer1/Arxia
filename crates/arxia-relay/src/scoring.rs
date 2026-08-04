@@ -755,7 +755,8 @@ mod tests {
 
     #[test]
     fn test_relay_score_rejects_forged_receipt_zero_signature() {
-        // The literal exploit from PHASE1 CRIT-004: build a
+        // The literal CRIT-004 exploit from the security review:
+        // build a
         // `RelayReceipt` with signature: vec![0; 64] and hand it to
         // record_success. The score MUST be unchanged and the call
         // MUST return Err.

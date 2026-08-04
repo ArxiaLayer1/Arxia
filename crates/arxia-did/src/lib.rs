@@ -43,7 +43,8 @@
 //! implementation uses base58 (see `from_public_key`). The strict
 //! parser here matches the implementation.
 //!
-//! Refs: PHASE1_AUDIT_REPORT.md HIGH-018, HIGH-019.
+//! Refs: HIGH-018, HIGH-019 (see docs/SECURITY_REVIEW.md for what
+//! review identifiers reference).
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

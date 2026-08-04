@@ -23,7 +23,8 @@
 //! malformed votes), inclusion second (defends valid-signature votes
 //! whose target is phantom).
 //!
-//! Refs: PHASE1_AUDIT_REPORT.md HIGH-006.
+//! Refs: HIGH-006 (see docs/SECURITY_REVIEW.md for what review
+//! identifiers reference).
 
 use arxia_core::ArxiaError;
 use ed25519_dalek::SigningKey;

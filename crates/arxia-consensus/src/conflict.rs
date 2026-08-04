@@ -43,7 +43,8 @@
 //!   uses a `BTreeMap` so the returned `Vec` is deterministic across
 //!   runs. Callers can index into it stably for tests and logs.
 //!
-//! Refs: PHASE1_AUDIT_REPORT.md HIGH-005, HIGH-025 (and CROSS-05).
+//! Refs: HIGH-005, HIGH-025 (and CROSS-05); see
+//! docs/SECURITY_REVIEW.md for what review identifiers reference.
 
 use crate::vote::VoteORV;
 use arxia_core::ArxiaError;
