@@ -13,7 +13,8 @@ subsystem can be wired into the node.
 A future implementation PR for `bin/arxia-node` SHALL be merged
 only after every requirement below is either satisfied (with a
 linked test) or explicitly deferred with a tracked exception in
-the audit register.
+the security-review register (see `SECURITY_REVIEW.md` for what
+the review identifiers reference).
 
 ---
 
