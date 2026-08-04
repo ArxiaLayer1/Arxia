@@ -21,6 +21,26 @@
 //!   the same fields — if code can tell them apart, the error must.
 //!   Each discriminant family has a test asserting exactly that, and
 //!   those tests are mutation-verified.
+//!
+//! # Declared exception: hex-string identifier payloads
+//!
+//! Nine fields across eight variants carry identifiers as
+//! hex-`String`s rather than `[u8; 32]`:
+//! `DuplicateReceive.source_hash`, `NonceConflict.account`,
+//! `NegativeBalance.account`, `UnknownVoteTarget.block_hash`,
+//! `IneligibleConflictBlockType.{block_hash, block_type}`,
+//! `BalanceMismatch.account`, `OpenNotGenesis.account`, and
+//! `UnknownSourceSend.source_hash`. These are fixed-format data, not
+//! prose: byte-for-byte copies of the corresponding `Block` fields,
+//! which are themselves hex-`String`-typed in the current public
+//! API (`block_type` is the fixed-vocabulary Debug tag of the block
+//! type). Routing and comparison work on them exactly as on
+//! `[u8; 32]`; only compactness differs. Retyping them ahead of the
+//! data model would put a hex decode at every construction site and
+//! a re-encode in every consumer that correlates errors with
+//! blocks. They retype together with the planned binary-first
+//! `Block` refactor — the wire-format-aligned move of `Block`'s own
+//! identifier fields to `[u8; 32]` — in one sweep, not before.
 
 use alloc::string::String;
 use thiserror::Error;
