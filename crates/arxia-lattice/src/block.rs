@@ -114,6 +114,12 @@ impl Block {
                 fault: KeyFault::Length { got: v.len() },
             })?;
         arxia_crypto::validate_pubkey_strict(&pubkey_bytes)?;
+        // Defense-in-depth: serde_json::to_string has no failing
+        // input for this enum (plain variants, no non-string map
+        // keys), so the error arm is unreachable today. It exists so
+        // the path stays typed instead of unwrapped if the payload
+        // ever grows a fallible shape; reachability is documented
+        // rather than pretended.
         let bt_json = serde_json::to_string(block_type).map_err(|_| ArxiaError::Serialization {
             item: SerializedItem::BlockType,
         })?;
@@ -128,6 +134,7 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arxia_core::HexFaultKind;
 
     /// Helper: produce a hex-encoded Ed25519 pubkey that passes
     /// `validate_pubkey_strict`. Pre-fix the tests below used
@@ -280,11 +287,28 @@ mod tests {
     fn compute_hash_distinguishes_non_hex_from_wrong_length_account() {
         let bt = BlockType::Open { initial_balance: 0 };
 
+        // Exact kind, not a wildcard: 'z' is the offending character
+        // at byte index 0, and a mutant swapping the mirror's From
+        // arms must fail here.
         let non_hex = Block::compute_hash(&"zz".repeat(32), "", &bt, 0, 1, 0);
         assert!(matches!(
             non_hex,
             Err(ArxiaError::InvalidKey {
-                fault: KeyFault::HexEncoding { .. }
+                fault: KeyFault::HexEncoding {
+                    kind: HexFaultKind::InvalidCharacter { c: 'z', index: 0 }
+                }
+            })
+        ));
+
+        // Odd-length hex is the other reachable decode fault, and it
+        // must stay distinguishable from the invalid-character case.
+        let odd = Block::compute_hash("abc", "", &bt, 0, 1, 0);
+        assert!(matches!(
+            odd,
+            Err(ArxiaError::InvalidKey {
+                fault: KeyFault::HexEncoding {
+                    kind: HexFaultKind::OddLength
+                }
             })
         ));
 

@@ -21,6 +21,26 @@
 //!   the same fields — if code can tell them apart, the error must.
 //!   Each discriminant family has a test asserting exactly that, and
 //!   those tests are mutation-verified.
+//!
+//! # Declared exception: hex-string identifier payloads
+//!
+//! Nine fields across eight variants carry identifiers as
+//! hex-`String`s rather than `[u8; 32]`:
+//! `DuplicateReceive.source_hash`, `NonceConflict.account`,
+//! `NegativeBalance.account`, `UnknownVoteTarget.block_hash`,
+//! `IneligibleConflictBlockType.{block_hash, block_type}`,
+//! `BalanceMismatch.account`, `OpenNotGenesis.account`, and
+//! `UnknownSourceSend.source_hash`. These are fixed-format data, not
+//! prose: byte-for-byte copies of the corresponding `Block` fields,
+//! which are themselves hex-`String`-typed in the current public
+//! API (`block_type` is the fixed-vocabulary Debug tag of the block
+//! type). Routing and comparison work on them exactly as on
+//! `[u8; 32]`; only compactness differs. Retyping them ahead of the
+//! data model would put a hex decode at every construction site and
+//! a re-encode in every consumer that correlates errors with
+//! blocks. They retype together with the planned binary-first
+//! `Block` refactor — the wire-format-aligned move of `Block`'s own
+//! identifier fields to `[u8; 32]` — in one sweep, not before.
 
 use alloc::string::String;
 use thiserror::Error;
@@ -589,6 +609,25 @@ mod tests {
     /// R2 of the typed-error rework: `Display` must stay operator-
     /// readable. Each rule renders a sentence carrying its payload,
     /// not a bare variant name.
+    /// R3, hex mirror: each From arm is pinned individually, payloads
+    /// included, so swapping two arms — or dropping a payload — fails
+    /// here rather than surviving behind a wildcard match.
+    #[test]
+    fn hex_fault_kind_mirrors_every_upstream_variant() {
+        assert_eq!(
+            HexFaultKind::from(hex::FromHexError::InvalidHexCharacter { c: 'z', index: 3 }),
+            HexFaultKind::InvalidCharacter { c: 'z', index: 3 }
+        );
+        assert_eq!(
+            HexFaultKind::from(hex::FromHexError::OddLength),
+            HexFaultKind::OddLength
+        );
+        assert_eq!(
+            HexFaultKind::from(hex::FromHexError::InvalidStringLength),
+            HexFaultKind::InvalidLength
+        );
+    }
+
     /// R2 for the storage family. Backend is the one deliberate
     /// String survivor; its Display must pass the engine's own
     /// diagnostic through verbatim.

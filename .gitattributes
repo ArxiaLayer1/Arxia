@@ -1,5 +1,6 @@
-# PHASE2-001 fix: force LF line endings on text files regardless
-# of host OS / git config.
+# Force LF line endings on text files regardless of host OS /
+# git config, so source-lint tests that split on literal markers
+# behave identically on Windows and Unix checkouts.
 #
 # Rationale: the workspace contains source-lint tests (in
 # arxia-lattice/src/chain.rs, arxia-lattice/src/serialization.rs,
