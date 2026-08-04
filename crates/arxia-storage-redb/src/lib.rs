@@ -83,7 +83,14 @@ impl RedbStorage {
     /// an empty table rather than `TableDoesNotExist`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ArxiaError> {
         let db = Database::create(path).map_err(storage_err)?;
-        let txn = db.begin_write().map_err(storage_err)?;
+        // Table creation goes through the same explicit-durability
+        // path as every other write: the crate's stance is that the
+        // guarantee never rides on an upstream default, and the
+        // mount marker this transaction creates is state a reopen
+        // depends on.
+        let mut txn = db.begin_write().map_err(storage_err)?;
+        txn.set_durability(Durability::Immediate)
+            .map_err(storage_err)?;
         // Opening the table inside a committed write transaction is
         // what creates it.
         txn.open_table(TABLE).map_err(storage_err)?;
