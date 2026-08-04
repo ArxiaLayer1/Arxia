@@ -51,9 +51,9 @@ From the ledger ingest path (`Ledger::add_block`):
 **Model constant: ~600 B of flash appends per completed transfer**
 [derived]. Cross-check: the in-memory ledger retains 1,544 B per
 transfer [measured — heap retention per completed transfer, HashMap
-and String overhead included]; the ~2.5x gap is
-`HashMap`/`String` overhead that serialized storage does not pay, so
-600 B is consistent rather than optimistic.
+and String overhead included]; the ~2.6x gap [derived — 1,544 / 600]
+is `HashMap`/`String` overhead that serialized storage does not pay,
+so 600 B is consistent rather than optimistic.
 
 An `Open` adds one 193 B block and a supply-accumulator update;
 opens are rare relative to transfers and are ignored below (they only
@@ -120,7 +120,11 @@ Workloads [assumed — LoRa airtime caps a T-Beam mesh node well below
 the top row; 10,000/day is a deliberate absurdity to bracket the
 model]:
 
-**Chain region, 2 MiB, 600 B/transfer:**
+**Chain region, 2 MiB, 600 B/transfer.** The u and transfer-rate
+columns are [assumed] scenario inputs; Erases/day and Lifetime are
+[derived] from them via the section-4 formulas (e.g. row 1:
+100 x 600 x 2 / 4096 = 29.3 erases/day; 100,000 / (365 x 29.3 / 512)
+= ~4,800 years):
 
 | Transfers/day | u (post-pruning) | WA | Erases/day | Lifetime |
 |---|---|---|---|---|
@@ -129,27 +133,34 @@ model]:
 | 1,000 | 0.9 | 10 | 1,465 | ~96 years |
 | 10,000 | 0.9 | 10 | 14,650 | ~9.6 years |
 
-**Hot region, 64 KiB, ~150 B/transfer of map traffic** (2 items),
-live set a few KiB so WA ~= 1:
+**Hot region, 64 KiB, ~210 B/transfer of map traffic** [derived —
+the two hot-path rows of section 2 (~80 + ~100 = ~180 B payload)
+plus their share of the per-item overhead (2 hot writes x ~16 B =
+~32 B); an earlier draft said ~150 B, which did not derive from the
+tagged rows and is corrected here]. Live set is a few KiB, so
+WA ~= 1. Wraps/day = rate x 210 / 65,536; lifetime =
+100,000 / (365 x wraps/day) [derived]:
 
 | Transfers/day | Wraps/day | Lifetime |
 |---|---|---|
-| 100 | 0.23 | ~1,200 years |
-| 1,000 | 2.3 | ~120 years |
-| 10,000 | 23 | ~12 years |
+| 100 | 0.32 | ~860 years |
+| 1,000 | 3.2 | ~86 years |
+| 10,000 | 32 | ~8.6 years |
 
 **Conclusion of the model: endurance is not the binding constraint at
 any plausible testnet rate.** The binding constraint is **capacity**:
-2 MiB / 600 B ~= 3,500 transfers before the chain region is full and
-pruning must run — consistent with the earlier projection of
+2 MiB / 600 B ~= 3,500 transfers [derived] before the chain region
+is full and pruning must run — consistent with the earlier projection of
 ~2,400-7,100 transfers for the whole device [derived — same per-
 transfer constants against candidate region sizes]. Pruning cadence, not wear, is what the storage
 roadmap has to engineer for. Wear only becomes a design input if the
 bench falsifies the model.
 
-Secondary prediction worth pinning: at 1,000 transfers/day the model
-says under ~3 sector-erases/day/sector-of-hot-region and ~300 erases/
-day total. These are countable events.
+Secondary prediction worth pinning [derived]: at 1,000
+transfers/day and u = 0.5 the model says ~3.2 wraps/day of the hot
+region (so ~3.2 erases/day on each of its 16 sectors) and ~340
+sector-erases/day in total (293 chain + 3.2 x 16 = 51 hot). These
+are countable events.
 
 ## 6. What the bench must measure (M3-6)
 
