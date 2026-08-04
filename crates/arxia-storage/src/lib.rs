@@ -307,12 +307,6 @@ enum StagedOp {
 pub struct MemoryTransaction<'a> {
     store: &'a mut MemoryStorage,
     staged: BTreeMap<Vec<u8>, StagedOp>,
-    /// Set to `true` by `commit()` so `Drop` knows not to
-    /// re-rollback (commit consumed `self`, but a panic during
-    /// commit's body would leave us in an in-between state).
-    /// Currently always `false` because commit consumes self
-    /// by value ; reserved for future fallible-commit paths.
-    committed: bool,
 }
 
 impl MemoryTransaction<'_> {
@@ -374,7 +368,6 @@ impl MemoryTransaction<'_> {
                 }
             }
         }
-        self.committed = true;
         Ok(())
     }
 
@@ -398,7 +391,6 @@ impl MemoryStorage {
         MemoryTransaction {
             store: self,
             staged: BTreeMap::new(),
-            committed: false,
         }
     }
 
