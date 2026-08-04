@@ -589,6 +589,25 @@ mod tests {
     /// R2 of the typed-error rework: `Display` must stay operator-
     /// readable. Each rule renders a sentence carrying its payload,
     /// not a bare variant name.
+    /// R3, hex mirror: each From arm is pinned individually, payloads
+    /// included, so swapping two arms — or dropping a payload — fails
+    /// here rather than surviving behind a wildcard match.
+    #[test]
+    fn hex_fault_kind_mirrors_every_upstream_variant() {
+        assert_eq!(
+            HexFaultKind::from(hex::FromHexError::InvalidHexCharacter { c: 'z', index: 3 }),
+            HexFaultKind::InvalidCharacter { c: 'z', index: 3 }
+        );
+        assert_eq!(
+            HexFaultKind::from(hex::FromHexError::OddLength),
+            HexFaultKind::OddLength
+        );
+        assert_eq!(
+            HexFaultKind::from(hex::FromHexError::InvalidStringLength),
+            HexFaultKind::InvalidLength
+        );
+    }
+
     /// R2 for the storage family. Backend is the one deliberate
     /// String survivor; its Display must pass the engine's own
     /// diagnostic through verbatim.

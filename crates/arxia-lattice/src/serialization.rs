@@ -641,4 +641,68 @@ mod tests {
         // Lenient form still works (regression guard).
         assert!(to_compact_bytes(&block).is_ok());
     }
+
+    /// R3, block-field family: every 32-byte field of the compact
+    /// encoding keeps its own discriminant. Only Account was pinned
+    /// before; a mutant freezing hex_decode_32's field parameter to
+    /// one value survived everything but the Account test. Each
+    /// remaining field now has a pin, byte count included.
+    #[test]
+    fn each_malformed_field_reports_its_own_discriminant() {
+        let mut vc = VectorClock::new();
+        let mut alice = AccountChain::new();
+        let mut bob = AccountChain::new();
+        alice.open(1_000_000, &mut vc).unwrap();
+        bob.open(0, &mut vc).unwrap();
+        let send = alice.send(bob.id(), 1_000, &mut vc).unwrap();
+        bob.receive(&send, &mut vc).unwrap();
+        let bad = "ab".repeat(8); // valid hex, 8 bytes instead of 32
+
+        let mut p = send.clone();
+        p.previous = bad.clone();
+        assert!(matches!(
+            to_compact_bytes(&p),
+            Err(ArxiaError::MalformedBlockField {
+                field: BlockField::Previous,
+                got: 8
+            })
+        ));
+
+        let mut d = send.clone();
+        d.block_type = BlockType::Send {
+            destination: bad.clone(),
+            amount: 1_000,
+        };
+        assert!(matches!(
+            to_compact_bytes(&d),
+            Err(ArxiaError::MalformedBlockField {
+                field: BlockField::Destination,
+                got: 8
+            })
+        ));
+
+        let mut s = bob.chain.last().unwrap().clone();
+        s.block_type = BlockType::Receive {
+            source_hash: bad.clone(),
+        };
+        assert!(matches!(
+            to_compact_bytes(&s),
+            Err(ArxiaError::MalformedBlockField {
+                field: BlockField::SourceHash,
+                got: 8
+            })
+        ));
+
+        let mut r = send.clone();
+        r.block_type = BlockType::Revoke {
+            credential_hash: bad.clone(),
+        };
+        assert!(matches!(
+            to_compact_bytes(&r),
+            Err(ArxiaError::MalformedBlockField {
+                field: BlockField::CredentialHash,
+                got: 8
+            })
+        ));
+    }
 }
