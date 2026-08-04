@@ -27,7 +27,7 @@
 //!   entries ≈ 720 KB worst-case bytes-on-wire.
 //!
 //! Caps for the remaining variants (`NonceSyncRequest`, `Ping`)
-//! are smaller surfaces and tracked as later Wave 4 cleanup.
+//! are smaller surfaces and tracked as later cleanup.
 
 use serde::{Deserialize, Serialize};
 
