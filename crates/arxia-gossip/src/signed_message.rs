@@ -56,9 +56,9 @@
 //! There is also no peer-pubkey registry yet: `verify` checks that the
 //! signature is consistent with the carried `sender_pubkey`, but does
 //! NOT check that `sender_pubkey` is in a known-good set of peers. That
-//! check belongs to a future commit once the consensus layer exposes a
-//! validated peer registry (paralleling the observer-registry follow-up
-//! noted in commit 018).
+//! check belongs to a future change, once the consensus layer exposes
+//! a validated peer registry (paralleling the observer-registry
+//! follow-up noted during the security review).
 
 use serde::{Deserialize, Serialize};
 

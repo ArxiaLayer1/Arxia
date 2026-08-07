@@ -5,7 +5,7 @@
 The gossip protocol propagates blocks, synchronizes the per-`(account,
 nonce)` registry, and detects double-spends across the mesh network.
 
-Wave 3 introduced two structural hardenings that earlier versions of
+The security review introduced two structural hardenings that earlier versions of
 this document did not reflect:
 
 - **Bounded state on every `GossipNode`** (audit ID **CRIT-011**,
@@ -19,8 +19,9 @@ this document did not reflect:
   public key under the domain prefix `arxia-gossip-msg-v1`. Forging
   a message at the gossip layer requires forging a signature.
 
-Both surfaces are described in this document; the audit context and
-attack vectors are summarized in `PHASE1_AUDIT_REPORT.md`.
+Both surfaces are described in this document; the attack vectors
+were catalogued during the security review (see `../SECURITY_REVIEW.md`
+for what the review identifiers reference).
 
 ---
 
@@ -276,7 +277,7 @@ pub enum SignedGossipMessageError {
     SignatureInvalid,              // Ed25519 verify failed (most general)
     // (additional structural error variants are added in future commits;
     //  see `MessageInvalid(MessageError)` from the per-variant size-cap
-    //  framework introduced post-Wave 3)
+    //  framework introduced later)
 }
 ```
 
@@ -286,7 +287,7 @@ canonical bytes under the carried `sender_pubkey`.
 
 `verify` does NOT check that `sender_pubkey` is in a known-good set
 of registered peers — that gating belongs to a future peer-registry
-commit. For Wave 3, the security property is "this message was
+commit. At this stage, the security property is "this message was
 signed by the holder of `sender_pubkey`", not "this peer is
 authorized to send".
 
@@ -316,7 +317,7 @@ for CRIT-010.
 
 ### 7.1. Limitation: dispatcher not yet wired
 
-As of Wave 3, no transport-level gossip dispatcher exists in the
+As of this writing, no transport-level gossip dispatcher exists in the
 workspace. `GossipNode` consumes `GossipMessage` only via direct
 in-process Rust calls (the test suites and example code). The
 `SignedGossipMessage` envelope is defined and verified, but the
@@ -376,5 +377,5 @@ reputation logic all belong to that future layer.
 | Version | Change |
 |---------|--------|
 | `0.1.x` | Initial gossip protocol: nonce registry, double-spend detection at merge, SyncResult variants. |
-| `0.2.0` (Wave 3, PR #45) | `GossipNode::known_blocks` and `nonce_registry` bounded with `MAX_KNOWN_BLOCKS` / `MAX_NONCE_REGISTRY_ENTRIES` defaults of 10 000 each. FIFO drop-oldest eviction; observable counters via `known_blocks_dropped()` / `nonce_registry_dropped()`. Idempotent `add_block` no longer grows the collections. Closes audit finding **CRIT-011**. |
-| `0.2.0` (Wave 3, PR #46) | `SignedGossipMessage` envelope wrapping `GossipMessage` with Ed25519 sender authentication under domain prefix `arxia-gossip-msg-v1`. New `verify()` API; `canonical_bytes` layout with 1-byte variant tags + length-prefixed big-endian payloads. Closes audit finding **CRIT-010**. |
+| `0.2.0` (PR #45) | `GossipNode::known_blocks` and `nonce_registry` bounded with `MAX_KNOWN_BLOCKS` / `MAX_NONCE_REGISTRY_ENTRIES` defaults of 10 000 each. FIFO drop-oldest eviction; observable counters via `known_blocks_dropped()` / `nonce_registry_dropped()`. Idempotent `add_block` no longer grows the collections. Closes audit finding **CRIT-011**. |
+| `0.2.0` (PR #46) | `SignedGossipMessage` envelope wrapping `GossipMessage` with Ed25519 sender authentication under domain prefix `arxia-gossip-msg-v1`. New `verify()` API; `canonical_bytes` layout with 1-byte variant tags + length-prefixed big-endian payloads. Closes audit finding **CRIT-010**. |

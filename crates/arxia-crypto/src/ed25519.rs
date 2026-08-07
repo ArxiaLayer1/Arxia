@@ -393,7 +393,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-002 (commit 073) — keypair uniqueness over a larger
+    // LOW-002 — keypair uniqueness over a larger
     // sample. The pre-fix `test_generate_keypair_unique` runs
     // only twice (vk1 != vk2). A broken RNG that produces
     // distinct outputs the first two calls and identical

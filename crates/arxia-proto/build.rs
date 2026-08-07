@@ -1,4 +1,4 @@
-// LOW-008 (commit 080): build.rs gates the protoc-required path
+// LOW-008: build.rs gates the protoc-required path
 // behind a runtime-detectable flag. When protoc is missing, the
 // crate emits a stub `arxia.rs` AND defines `cfg(arxia_proto_stub)`
 // so downstream callers (and tests) can detect the stub mode at

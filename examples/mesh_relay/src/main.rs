@@ -4,7 +4,7 @@
 //! keypair, signs a receipt over the message it forwarded, and hands
 //! that signed receipt to its own [`RelayScore`] to get credit.
 //!
-//! # HIGH-024 (commit 044) — receipt signing IS the canonical pattern
+//! # HIGH-024 — receipt signing IS the canonical pattern
 //!
 //! The audit (HIGH-024):
 //!

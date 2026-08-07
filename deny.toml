@@ -1,6 +1,6 @@
 # cargo-deny policy for the Arxia workspace.
 #
-# LOW-014 (commit 084): reviewed and pinned. The settings below
+# LOW-014: reviewed and pinned. The settings below
 # are the audit-acknowledged baseline ; changes require an
 # explicit security-review commit citing this file.
 

@@ -15,12 +15,12 @@
 # fresh-clone invariant for ~50% of contributing developers.
 #
 # This file is the root-cause fix. The source-lint tests have
-# also been hardened in the same commit to be CRLF-tolerant
+# also been hardened at the same time to be CRLF-tolerant
 # (they now split on the bare `#[cfg(test)]` attribute), as
 # defense-in-depth.
 #
-# Re-opens / contradicts Phase 1 findings MED-002 (commit 055)
-# and MED-003 (commit 051): their source-lint test idioms were
+# Supersedes the earlier security-review findings MED-002 and
+# MED-003 on this point: their source-lint test idioms were
 # validated only on dev boxes preserving LF.
 
 # Force LF on every Rust source, every TOML config, every

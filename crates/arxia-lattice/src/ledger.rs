@@ -127,7 +127,7 @@ impl Ledger {
 
     /// Add a block to the ledger, after verifying its Ed25519 signature
     /// and recomputed Blake3 hash AND its position in the per-account
-    /// chain (HIGH-003, closed in commit 031).
+    /// chain (HIGH-003).
     ///
     /// The chain-continuity check enforces incrementally what
     /// [`crate::validation::verify_chain_integrity`] enforces post-hoc:
@@ -223,7 +223,7 @@ impl Ledger {
         let prior_balance = chain.last().map(|b| b.balance).unwrap_or(0);
         let is_genesis = chain.last().is_none();
 
-        // HIGH-003 (commit 031): incremental chain-continuity check.
+        // HIGH-003: incremental chain-continuity check.
         // Mirrors `verify_chain_integrity` but per-block, so the ledger
         // never accepts orphan blocks or parallel history within one
         // chain.

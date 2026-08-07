@@ -86,7 +86,7 @@ impl RedbStorage {
         // Table creation goes through the same explicit-durability
         // path as every other write: the crate's stance is that the
         // guarantee never rides on an upstream default, and the
-        // mount marker this transaction creates is state a reopen
+        // table this transaction creates is state every reopen
         // depends on.
         let mut txn = db.begin_write().map_err(storage_err)?;
         txn.set_durability(Durability::Immediate)

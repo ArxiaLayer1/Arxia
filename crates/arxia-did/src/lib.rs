@@ -2,7 +2,7 @@
 //!
 //! Format: `did:arxia:<base58(blake3(pubkey_bytes))>`
 //!
-//! # Strict pubkey validation (HIGH-018, commit 037)
+//! # Strict pubkey validation (HIGH-018)
 //!
 //! [`ArxiaDid::from_public_key`] validates the input bytes via
 //! [`arxia_crypto::validate_pubkey_strict`] before constructing the
@@ -10,7 +10,7 @@
 //! `InvalidKey`. See module docstring of `arxia_crypto::ed25519`
 //! for the dalek 2.x semantics.
 //!
-//! # Strict string parser (HIGH-019, commit 038)
+//! # Strict string parser (HIGH-019)
 //!
 //! [`parse_did`] is the canonical entry point for *received* DID
 //! strings (RPC, contracts, log entries, user input). It validates:
@@ -43,7 +43,8 @@
 //! implementation uses base58 (see `from_public_key`). The strict
 //! parser here matches the implementation.
 //!
-//! Refs: PHASE1_AUDIT_REPORT.md HIGH-018, HIGH-019.
+//! Refs: HIGH-018, HIGH-019 (see docs/SECURITY_REVIEW.md for what
+//! review identifiers reference).
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -174,7 +175,7 @@ impl std::fmt::Display for ParsedArxiaDid {
 impl std::str::FromStr for ParsedArxiaDid {
     type Err = ArxiaError;
 
-    /// LOW-010 (commit 079): standard `FromStr` impl that
+    /// LOW-010: standard `FromStr` impl that
     /// delegates to [`parse_did`]. Returned `Err` is
     /// `ArxiaError::InvalidDid { fault }` exactly as `parse_did`
     /// produces — no information loss compared to the
@@ -275,7 +276,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-018 (commit 037) — from_public_key validates the curve
+    // HIGH-018 — from_public_key validates the curve
     // point before building the DID.
     // ============================================================
 
@@ -316,7 +317,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-019 (commit 038) — parse_did + ParsedArxiaDid +
+    // HIGH-019 — parse_did + ParsedArxiaDid +
     // identifier_strict. The strict string parser rejects
     // malformed prefix, non-base58 identifier, and wrong-length
     // identifier.
@@ -487,7 +488,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-021 (commit 068) — strict alignment between `ArxiaDid`
+    // MED-021 — strict alignment between `ArxiaDid`
     // (built from a pubkey) and `ParsedArxiaDid` (parsed from a
     // string). Pre-fix the two types had separate identifier
     // accessors with no test pinning that they agreed on the
@@ -583,7 +584,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-010 (commit 079) — `FromStr` impl for `ParsedArxiaDid`.
+    // LOW-010 — `FromStr` impl for `ParsedArxiaDid`.
     // The pre-fix path required calling `parse_did(s)` directly ;
     // adding `FromStr` makes idiomatic `s.parse()` work and
     // delegates to the same parser without information loss.

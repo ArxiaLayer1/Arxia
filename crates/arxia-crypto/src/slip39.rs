@@ -9,7 +9,7 @@
 //! and never touch their inputs.
 //!
 //! Pre-fix these functions were panic-on-call stubs (the standard
-//! `todo` macro) — see CRIT-003 in `PHASE1_AUDIT_REPORT`. A caller
+//! `todo` macro) — CRIT-003 in the security review. A caller
 //! reaching the wallet-backup / key-recovery flow would panic the
 //! process. Replacing the panic with an explicit `Err(Unimplemented)`
 //! surfaces the unimplemented state to the type system.

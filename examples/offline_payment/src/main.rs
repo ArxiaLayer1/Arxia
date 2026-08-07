@@ -5,7 +5,7 @@
 //! verify each block, then assess finality with an authenticated
 //! L0 confirmation.
 //!
-//! # Error-propagation pattern (HIGH-023, commit 046)
+//! # Error-propagation pattern (HIGH-023)
 //!
 //! Pre-fix this example used `.unwrap()` and `.expect(...)` for
 //! every fallible call. The audit (HIGH-023):

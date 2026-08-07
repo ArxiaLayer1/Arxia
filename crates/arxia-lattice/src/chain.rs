@@ -10,10 +10,10 @@ use arxia_core::ArxiaError;
 
 /// Vector clock for causal ordering. Uses BTreeMap for deterministic iteration.
 ///
-/// **NOT the same as `arxia_crdt::CrdtVectorClock`** (LOW-006,
-/// commit 077). This lattice form is used at block-creation time
+/// **NOT the same as `arxia_crdt::CrdtVectorClock`** (LOW-006).
+/// This lattice form is used at block-creation time
 /// and is capped at [`arxia_core::MAX_VECTOR_CLOCK_ENTRIES`]
-/// (commit 061) to bound adversarial peers' memory impact at the
+/// to bound adversarial peers' memory impact at the
 /// hot path. The CRDT form has no cap (CRDTs absorb arbitrary
 /// participation). Pick by use case ; the names are deliberately
 /// similar but the semantics differ.
@@ -33,10 +33,10 @@ impl VectorClock {
 
     /// Increment the clock for the given node.
     ///
-    /// MED-018 (commit 060): uses `saturating_add` against
+    /// MED-018: uses `saturating_add` against
     /// u64::MAX wrap.
     ///
-    /// MED-019 (commit 061): refuses NEW entries beyond
+    /// MED-019: refuses NEW entries beyond
     /// `arxia_core::MAX_VECTOR_CLOCK_ENTRIES` (256). Existing
     /// entries continue to tick normally.
     pub fn tick(&mut self, node_id: &str) {
@@ -52,7 +52,7 @@ impl VectorClock {
 
     /// Merge with another vector clock (element-wise max).
     ///
-    /// MED-019 (commit 061): same cap as `tick` — merging in
+    /// MED-019: same cap as `tick` — merging in
     /// a new node ID beyond
     /// `arxia_core::MAX_VECTOR_CLOCK_ENTRIES` is silently
     /// dropped. Existing entries always merge.
@@ -153,7 +153,7 @@ impl AccountChain {
     /// Short identifier (first 8 hex chars of the public-key hex
     /// encoding).
     ///
-    /// LOW-004 (commit 075): defensive slice. The invariant is
+    /// LOW-004: defensive slice. The invariant is
     /// that `public_key_hex` is always 64 chars (`hex::encode` of
     /// a 32-byte Ed25519 pubkey) so the unchecked `[..8]` never
     /// panics in production. We still use `get(..8)` and fall back
@@ -216,8 +216,8 @@ impl AccountChain {
             timestamp,
         )?;
         // CRITICAL: sign raw Blake3 bytes (32 bytes), NOT hex string
-        // MED-002 (commit 055): typed-error on internal hex
-        // decode. `compute_hash` (commit 050) returns a
+        // MED-002: typed-error on internal hex
+        // decode. `compute_hash` returns a
         // 64-char lowercase hex string by construction; the
         // decode is unreachable today. Defense-in-depth: a
         // future refactor that swaps the hash algorithm or
@@ -246,7 +246,7 @@ impl AccountChain {
     /// Returns:
     /// - [`ArxiaError::ZeroAmount`] if `amount == 0`.
     /// - [`ArxiaError::SelfSendNotAllowed`] if `destination` equals
-    ///   the sender's own public key hex (HIGH-002, closed in commit 029).
+    ///   the sender's own public key hex (HIGH-002).
     ///   Self-sends inflate the nonce without an economic effect and,
     ///   combined with any dedup-bypass on the receive path, would
     ///   become a free-mint vector.
@@ -260,7 +260,7 @@ impl AccountChain {
         if amount == 0 {
             return Err(ArxiaError::ZeroAmount);
         }
-        // HIGH-002 (commit 029): reject self-sends BEFORE any state
+        // HIGH-002: reject self-sends BEFORE any state
         // mutation. The check fires before `balance < amount` so a
         // self-send always reports the structural error, not the
         // semantic one (insufficient balance), regardless of the
@@ -296,8 +296,8 @@ impl AccountChain {
             self.nonce,
             timestamp,
         )?;
-        // MED-002 (commit 055): typed-error on internal hex
-        // decode. `compute_hash` (commit 050) returns a
+        // MED-002: typed-error on internal hex
+        // decode. `compute_hash` returns a
         // 64-char lowercase hex string by construction; the
         // decode is unreachable today. Defense-in-depth: a
         // future refactor that swaps the hash algorithm or
@@ -400,8 +400,8 @@ impl AccountChain {
             self.nonce,
             timestamp,
         )?;
-        // MED-002 (commit 055): typed-error on internal hex
-        // decode. `compute_hash` (commit 050) returns a
+        // MED-002: typed-error on internal hex
+        // decode. `compute_hash` returns a
         // 64-char lowercase hex string by construction; the
         // decode is unreachable today. Defense-in-depth: a
         // future refactor that swaps the hash algorithm or
@@ -1024,7 +1024,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-002 (commit 055) — typed-error on internal hex decode.
+    // MED-002 — typed-error on internal hex decode.
     // ============================================================
 
     #[test]
@@ -1056,7 +1056,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-018 (commit 060) — VectorClock tick saturating_add
+    // MED-018 — VectorClock tick saturating_add
     // defends against u64::MAX wrap.
     // ============================================================
 
@@ -1099,7 +1099,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-019 (commit 061) — VectorClock enforces
+    // MED-019 — VectorClock enforces
     // MAX_VECTOR_CLOCK_ENTRIES cap on tick + merge.
     // ============================================================
 
@@ -1183,7 +1183,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-004 (commit 075) — short_id defensive slice. The
+    // LOW-004 — short_id defensive slice. The
     // invariant is that public_key_hex is always 64 chars
     // (hex::encode of 32 bytes), so the original [..8] never
     // panicked in production. The post-fix `get(..8)` keeps

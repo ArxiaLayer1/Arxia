@@ -1,6 +1,6 @@
 //! Conflict resolution with 3-tier ORV cascade.
 //!
-//! # Block-type gate (HIGH-025, commit 035)
+//! # Block-type gate (HIGH-025)
 //!
 //! [`resolve_conflict_orv`] is the *monetary / chain-continuity*
 //! adjudicator. It decides which of two competing blocks at the same
@@ -19,12 +19,11 @@
 //! Fix: only `{Open, Send, Receive}` are eligible. Any block whose
 //! type is `Revoke` is rejected with
 //! [`ArxiaError::IneligibleConflictBlockType`] before any stake
-//! computation. Combined with HIGH-006 (commit 034,
-//! [`crate::vote::verify_vote_known`]), this closes the CROSS-05
+//! computation. Combined with HIGH-006, this closes the CROSS-05
 //! cascade: a vote can no longer steer a Revoke into the cascade,
 //! and a Revoke can no longer enter the cascade in the first place.
 //!
-//! # Double-spend reporting (HIGH-005, commit 033)
+//! # Double-spend reporting (HIGH-005)
 //!
 //! [`detect_double_spend`] scans a slice of blocks for `(account, nonce)`
 //! collisions. Each collision group is reported as a tuple
@@ -44,7 +43,8 @@
 //!   uses a `BTreeMap` so the returned `Vec` is deterministic across
 //!   runs. Callers can index into it stably for tests and logs.
 //!
-//! Refs: PHASE1_AUDIT_REPORT.md HIGH-005, HIGH-025 (and CROSS-05).
+//! Refs: HIGH-005, HIGH-025 (and CROSS-05); see
+//! docs/SECURITY_REVIEW.md for what review identifiers reference.
 
 use crate::vote::VoteORV;
 use arxia_core::ArxiaError;
@@ -231,7 +231,7 @@ mod tests {
         assert!(detect_double_spend(&[b1, b2]).is_empty());
     }
 
-    /// Regression guard for commit 024 (`clippy::manual_abs_diff`).
+    /// Regression guard for the `clippy::manual_abs_diff` cleanup.
     /// Pins the symmetry of the gap computation in
     /// [`resolve_conflict_orv`]: regardless of which side has more
     /// stake, the absolute gap drives the same decision branch. If a
@@ -279,7 +279,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-005 (commit 033) — detect_double_spend reports ALL
+    // HIGH-005 — detect_double_spend reports ALL
     // competitors per (account, nonce) group, not just the first
     // pair.
     // ============================================================
@@ -421,7 +421,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-025 (commit 035) — resolve_conflict_orv block-type gate.
+    // HIGH-025 — resolve_conflict_orv block-type gate.
     // Only {Open, Send, Receive} are eligible. Revoke is rejected
     // before any stake computation.
     // ============================================================

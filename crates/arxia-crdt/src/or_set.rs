@@ -1,6 +1,6 @@
 //! OR-Set (Observed-Remove Set) CRDT with add-wins semantics.
 //!
-//! # Serializable for replica transmission (MED-015, commit 054)
+//! # Serializable for replica transmission (MED-015)
 //!
 //! [`ORSet`] derives `Serialize` / `Deserialize`. CRDTs travel
 //! between replicas to converge state — without serde derives,
@@ -12,7 +12,7 @@
 //! > Suggested fix direction: derive `Serialize`/`Deserialize`;
 //! > add round-trip tests.
 //!
-//! # `remove` returns existence (MED-014, commit 053)
+//! # `remove` returns existence (MED-014)
 //!
 //! Pre-fix [`ORSet::remove`] returned `()`, so callers couldn't
 //! distinguish "removed an element that was present" from
@@ -28,9 +28,9 @@
 //! element was present and removed, `false` if it was already
 //! absent. There's no error case for this CRDT operation, so
 //! `bool` is more precise than `Result<bool, _>`. The pattern
-//! parallels HIGH-021 / commit 039 (`StorageBackend::delete`)
-//! at the storage layer; this commit closes the same
-//! existence-signal gap at the CRDT layer.
+//! parallels HIGH-021 (`StorageBackend::delete`) at the storage
+//! layer; this closes the same existence-signal gap at the CRDT
+//! layer.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,7 +55,7 @@ impl<T: Ord + Eq + Clone> ORSet<T> {
     }
     /// Add an element with a unique tag.
     ///
-    /// MED-013 (commit 057): uses `saturating_add` instead of
+    /// MED-013: uses `saturating_add` instead of
     /// `+=` to defend against `u64::MAX` wrap. At wrap, the
     /// counter sticks at `u64::MAX` and subsequent adds reuse
     /// the last tag — duplicate-tag detection is up to the
@@ -113,7 +113,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-014 (commit 053) — remove returns bool indicating
+    // MED-014 — remove returns bool indicating
     // whether the element existed.
     // ============================================================
 
@@ -175,7 +175,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-015 (commit 054) — ORSet derives Serialize/Deserialize
+    // MED-015 — ORSet derives Serialize/Deserialize
     // for replica transmission.
     // ============================================================
 
@@ -247,7 +247,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-013 (commit 057) — tag_counter saturating_add defends
+    // MED-013 — tag_counter saturating_add defends
     // against u64::MAX wrap.
     // ============================================================
 

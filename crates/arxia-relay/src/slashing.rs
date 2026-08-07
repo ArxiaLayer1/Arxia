@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn test_domain_separation_vs_relay_receipt_domain() {
         // A signature minted with the relay-receipt domain prefix
-        // (commit 013) MUST NOT verify as a slashing proof.
+        // MUST NOT verify as a slashing proof.
         use crate::receipt::RELAY_RECEIPT_DOMAIN;
         let (sk, vk) = generate_keypair();
         let pk = vk.to_bytes();

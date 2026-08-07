@@ -1,6 +1,6 @@
 //! Relay node reputation scoring.
 //!
-//! # Rolling-window score (HIGH-015, commit 048)
+//! # Rolling-window score (HIGH-015)
 //!
 //! Pre-fix [`RelayScore::score`] is lifetime-cumulative: a relay
 //! that was legitimate for 29 days then turns hostile keeps its
@@ -32,7 +32,7 @@
 //! via the `_at` variants; the cumulative `score: i64` field
 //! remains for callers that prefer the lifetime view.
 //!
-//! # Per-target censorship detection (HIGH-016, commit 049)
+//! # Per-target censorship detection (HIGH-016)
 //!
 //! Aggregate scoring (lifetime or rolling) cannot detect a relay
 //! that forwards 99% of messages globally but drops 100% of one
@@ -76,7 +76,7 @@ pub const RELAY_ID_LEN: usize = 64;
 /// Errors returned by [`RelayScore::try_new`] when validating
 /// a candidate `relay_id`.
 ///
-/// LOW-007 (commit 078): typed validation at the trust boundary.
+/// LOW-007: typed validation at the trust boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayIdError {
     /// The `relay_id` is not exactly [`RELAY_ID_LEN`] characters long.
@@ -220,7 +220,7 @@ impl RelayScore {
     /// Create a new relay score, validating that `relay_id` is a
     /// 64-character hex-encoded Ed25519 public key.
     ///
-    /// LOW-007 (commit 078): the lenient [`RelayScore::new`]
+    /// LOW-007: the lenient [`RelayScore::new`]
     /// accepts any `String`, including malformed identifiers
     /// that wouldn't match the canonical pubkey-hex format used
     /// elsewhere in the workspace (e.g. `arxia_lattice::AccountChain::id`
@@ -321,7 +321,7 @@ impl RelayScore {
     /// good standing" by the default [`RelayScore::is_trusted`]
     /// gate.
     ///
-    /// MED-011 (commit 065): the threshold value was previously
+    /// MED-011: the threshold value was previously
     /// implicit in the body of `is_trusted` (`self.score > 0`).
     /// Lifting it to a named constant lets callers reason about
     /// the contract symbolically and lets sensitivity-aware
@@ -347,7 +347,7 @@ impl RelayScore {
     /// Whether this relay's cumulative score is at or above
     /// `threshold`.
     ///
-    /// MED-011 (commit 065): explicit-threshold variant. A
+    /// MED-011: explicit-threshold variant. A
     /// caller can ask "is this relay trusted at score ≥ 50 ?"
     /// for sensitive operations, while default callers continue
     /// to use [`RelayScore::is_trusted`] (threshold = 1). No
@@ -755,7 +755,8 @@ mod tests {
 
     #[test]
     fn test_relay_score_rejects_forged_receipt_zero_signature() {
-        // The literal exploit from PHASE1 CRIT-004: build a
+        // The literal CRIT-004 exploit from the security review:
+        // build a
         // `RelayReceipt` with signature: vec![0; 64] and hand it to
         // record_success. The score MUST be unchanged and the call
         // MUST return Err.
@@ -1025,7 +1026,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-015 (commit 048) — rolling-window scoring.
+    // HIGH-015 — rolling-window scoring.
     //
     // The audit's exact attack: a relay legitimate for 29 days,
     // hostile on day 30. Cumulative `score` reflects 29 days of
@@ -1246,7 +1247,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-016 (commit 049) — per-target censorship detection.
+    // HIGH-016 — per-target censorship detection.
     //
     // The audit's exact attack: a relay forwards 99% of
     // messages globally but drops 100% of Alice's messages.
@@ -1413,7 +1414,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-011 (commit 065) — explicit TRUST_THRESHOLD constant +
+    // MED-011 — explicit TRUST_THRESHOLD constant +
     // is_trusted_with_threshold variant. The pre-fix `is_trusted`
     // used a hard-coded `> 0` ; this commit lifts the threshold
     // to a named constant and adds a stricter-threshold variant
@@ -1486,7 +1487,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-007 (commit 078) — `relay_id` pubkey-hex validation.
+    // LOW-007 — `relay_id` pubkey-hex validation.
     // The pre-fix `RelayScore::new` accepts any String. The new
     // `try_new` validates 64-char hex (Ed25519 pubkey hex
     // encoding). Backward-compat: `new` unchanged.

@@ -39,7 +39,7 @@
 //! verify (loud failure — a registered key signing wrong is
 //! actionable evidence of misbehavior).
 //!
-//! # Latched monotonic finality (HIGH-017, commit 042)
+//! # Latched monotonic finality (HIGH-017)
 //!
 //! Finality is supposed to be monotonic: once a block reaches L1,
 //! subsequent reassessments must return L1 or higher — never L0,
@@ -264,9 +264,10 @@ fn verify_signature(
 ///
 /// # Limitation
 ///
-/// This is a flat in-memory map for now. A future commit will sync
-/// the registry from the consensus layer (paralleling the observer-
-/// registry follow-up of commit 018). For deployments today, the
+/// This is a flat in-memory map for now. A future change will sync
+/// the registry from the consensus layer (paralleling the
+/// observer-registry follow-up noted during the security review).
+/// For deployments today, the
 /// caller is responsible for populating the registry from a
 /// trusted source.
 #[derive(Debug, Clone, Default)]
@@ -886,7 +887,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-010 (commit 064) — L0 cap boundary explicit pins.
+    // MED-010 — L0 cap boundary explicit pins.
     //
     // The cap is `<=` (line in `assess_finality`):
     //     if amount_micro_arx <= L0_CAP_MICRO_ARX { ... }
@@ -1087,7 +1088,7 @@ mod tests {
     }
 
     // ========================================================================
-    // FinalityLatch — HIGH-017 monotonic finality (commit 042).
+    // FinalityLatch — HIGH-017 monotonic finality.
     //
     // Once a block reaches level L, subsequent assessments must
     // return ≥ L for that block. A sync glitch / vote churn /

@@ -52,7 +52,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-003 (commit 074) — Blake3 edge inputs.
+    // LOW-003 — Blake3 edge inputs.
     //
     // The pre-fix suite covered "hello" / "world" / "test" /
     // "consistency check" (4 short, ASCII, non-empty inputs).

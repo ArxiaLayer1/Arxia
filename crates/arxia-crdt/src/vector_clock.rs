@@ -1,6 +1,6 @@
 //! Canonical Vector Clock with BTreeMap for deterministic ordering.
 //!
-//! # LOW-006 (commit 077): two VC types, deliberately distinct
+//! # LOW-006: two VC types, deliberately distinct
 //!
 //! The Arxia workspace has **two** vector-clock types with
 //! near-identical names. They are NOT interchangeable:
@@ -139,10 +139,10 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-006 (commit 077) — pin the deliberate two-VC-types
+    // LOW-006 — pin the deliberate two-VC-types
     // distinction. The CRDT form uses BTreeMap (deterministic
     // ordering for serialisation) ; the lattice form uses
-    // HashMap with a cap (commit 061) for fast block-creation
+    // HashMap with a cap for fast block-creation
     // ticks. Both names are similar by design but the
     // semantic split must remain visible in tests.
     // ============================================================

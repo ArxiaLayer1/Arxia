@@ -1,6 +1,6 @@
 # `bin/arxia-node` — Security Interfaces
 
-**Status:** drafted (HIGH-027, commit 087). Gates the implementation
+**Status:** drafted (HIGH-027). Gates the implementation
 PR for the production node binary.
 
 This document specifies the security contract every subsystem of
@@ -13,7 +13,8 @@ subsystem can be wired into the node.
 A future implementation PR for `bin/arxia-node` SHALL be merged
 only after every requirement below is either satisfied (with a
 linked test) or explicitly deferred with a tracked exception in
-the audit register.
+the security-review register (see `SECURITY_REVIEW.md` for what
+the review identifiers reference).
 
 ---
 
@@ -95,8 +96,8 @@ prior unclean shutdown.
   recover cleanly. Refuse to start ; never silently elide
   partial state. (Ties to HIGH-020.)
 - The backend MUST reject database files whose checksum does
-  not match the per-key checksum (LOW-011 from commit 082 ; the
-  helper `wrap_with_checksum` is the building block).
+  not match the per-key checksum (LOW-011 ; the helper
+  `wrap_with_checksum` is the building block).
 - On first start (no on-disk state), the backend MUST create
   files with mode 0600 (Unix) or equivalent ACLs (Windows).
   World-readable storage of nonce registries leaks chain
@@ -128,8 +129,7 @@ prior unclean shutdown.
   a vector for HIGH-008 / HIGH-014 amplification.
 - TLS / Noise handshake on TCP transports (when added) MUST be
   rejected if the peer does not present a key matching the
-  registered relay set (HIGH-008 receipt registry from
-  commit 029).
+  registered relay set (HIGH-008 receipt registry).
 - Per-peer rate limits MUST be enabled before listen starts,
   not lazily on first message.
 
@@ -157,7 +157,7 @@ state as the canonical chain.
 - The validator registry, if persisted, MUST be loaded with
   HIGH-018 strict pubkey validation on every entry. A
   malformed registry refuses node start.
-- The `FinalityLatch` (HIGH-017, commit 042) MUST be persisted
+- The `FinalityLatch` (HIGH-017) MUST be persisted
   across restarts. Losing the latch causes the node to
   re-issue receipts at lower finality levels post-restart,
   which is the regression the latch closes.

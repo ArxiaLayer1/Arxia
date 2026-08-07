@@ -1,6 +1,6 @@
 //! Vote structure and cryptographic operations for ORV.
 //!
-//! # Ingress contract — votes must reference known blocks (HIGH-006, commit 034)
+//! # Ingress contract — votes must reference known blocks (HIGH-006)
 //!
 //! [`cast_vote`] constructs and signs a vote locally. It does not
 //! check that the target block is in any block store: the caller
@@ -23,7 +23,8 @@
 //! malformed votes), inclusion second (defends valid-signature votes
 //! whose target is phantom).
 //!
-//! Refs: PHASE1_AUDIT_REPORT.md HIGH-006.
+//! Refs: HIGH-006 (see docs/SECURITY_REVIEW.md for what review
+//! identifiers reference).
 
 use arxia_core::ArxiaError;
 use ed25519_dalek::SigningKey;
@@ -160,7 +161,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-006 (commit 034) — verify_vote_known rejects votes
+    // HIGH-006 — verify_vote_known rejects votes
     // whose block_hash is not in the local block store.
     // ============================================================
 

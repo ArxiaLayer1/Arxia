@@ -1,6 +1,6 @@
 //! Benchmark utilities for Arxia.
 //!
-//! # Production-impl validation (LOW-009, commit 081)
+//! # Production-impl validation (LOW-009)
 //!
 //! The criterion benches in `benches/crypto_bench.rs` call into
 //! `arxia_crypto::{hash_blake3, sign, verify}` and other
@@ -29,7 +29,7 @@ pub use arxia_lattice;
 #[cfg(test)]
 mod tests {
     // ============================================================
-    // LOW-009 (commit 081) — bench targets are production impls.
+    // LOW-009 — bench targets are production impls.
     //
     // Each test calls the same `arxia_crypto::xxx` path the
     // benches in benches/crypto_bench.rs use, then asserts a

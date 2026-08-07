@@ -10,7 +10,7 @@
 //! any field of the receipt for a state change — this is the core
 //! mitigation for CRIT-004 (forged-receipt reputation inflation).
 //!
-//! # Hop-count bound (HIGH-014, commit 036)
+//! # Hop-count bound (HIGH-014)
 //!
 //! `hop_count` is capped at [`MAX_HOPS_PER_RECEIPT`]. A receipt whose
 //! `hop_count` exceeds the cap is rejected with
@@ -448,7 +448,7 @@ mod tests {
     }
 
     // ============================================================
-    // HIGH-014 (commit 036) — hop_count cap.
+    // HIGH-014 — hop_count cap.
     // Receipts with `hop_count > MAX_HOPS_PER_RECEIPT` are rejected
     // BEFORE any Ed25519 work.
     // ============================================================

@@ -43,7 +43,7 @@ pub const DEFAULT_OUTBOX_CAPACITY: usize = 1024;
 /// Default seed for the deterministic xorshift64 PRNG used by
 /// [`SimulatedTransport`] to simulate packet loss.
 ///
-/// MED-007 (commit 067): the seed is now a named constant and
+/// MED-007: the seed is now a named constant and
 /// can be overridden via [`SimulatedTransport::with_seed`] /
 /// [`SimulatedTransport::with_capacity_and_seed`]. Tests that
 /// need to exercise a specific loss pattern can pin the seed ;
@@ -123,7 +123,7 @@ impl SimulatedTransport {
     /// Create a simulated transport with a caller-supplied PRNG seed
     /// and the default inbox/outbox capacities.
     ///
-    /// MED-007 (commit 067): tests that need to exercise a specific
+    /// MED-007: tests that need to exercise a specific
     /// loss pattern can pin the seed (e.g. via property testing) ;
     /// tests that need divergent patterns across runs can vary it
     /// without forking the constructor. Default callers continue to
@@ -143,7 +143,7 @@ impl SimulatedTransport {
     /// Create a simulated transport with both custom capacities AND a
     /// caller-supplied PRNG seed.
     ///
-    /// MED-007 (commit 067): full-control constructor. All other
+    /// MED-007: full-control constructor. All other
     /// constructors (`new`, `with_capacity`, `with_seed`, `lora`,
     /// `ble`) delegate here.
     pub fn with_capacity_and_seed(
@@ -289,7 +289,7 @@ impl SimulatedTransport {
 
     /// Current xorshift64 PRNG state.
     ///
-    /// MED-007 (commit 067): exposed for test inspection so a
+    /// MED-007: exposed for test inspection so a
     /// caller can verify the PRNG advanced (or didn't) over a
     /// known sequence of `send` calls.
     pub fn rng_state(&self) -> u64 {
@@ -523,7 +523,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-006 (commit 066) — latency-respecting injection / recv.
+    // MED-006 — latency-respecting injection / recv.
     // The pre-fix `latency_ms` field was stored and exposed via
     // `latency_ms()` but never enforced ; messages injected via
     // `inject_message` were available immediately on `try_recv`.
@@ -622,7 +622,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-007 (commit 067) — caller-supplied PRNG seed.
+    // MED-007 — caller-supplied PRNG seed.
     // The pre-fix `with_capacity` hard-coded the seed to
     // `0xDEAD_BEEF_CAFE_BABE` ; tests that needed divergent loss
     // patterns had to fork the constructor. New `with_seed` and

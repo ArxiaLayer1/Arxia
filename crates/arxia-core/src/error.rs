@@ -606,9 +606,6 @@ pub enum SerializedItem {
 mod tests {
     use super::*;
 
-    /// R2 of the typed-error rework: `Display` must stay operator-
-    /// readable. Each rule renders a sentence carrying its payload,
-    /// not a bare variant name.
     /// R3, hex mirror: each From arm is pinned individually, payloads
     /// included, so swapping two arms — or dropping a payload — fails
     /// here rather than surviving behind a wildcard match.
@@ -706,6 +703,9 @@ mod tests {
         assert_eq!(s.to_string(), "serialization failed for block type");
     }
 
+    /// R2 of the typed-error rework: `Display` must stay operator-
+    /// readable. Each rule renders a sentence carrying its payload,
+    /// not a bare variant name.
     #[test]
     fn genesis_rule_display_is_operator_readable() {
         let nonce = GenesisRule::NonceMustBeOne { got: 7 };

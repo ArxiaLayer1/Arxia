@@ -253,7 +253,7 @@ impl GossipNode {
     /// Add a peer.
     ///
     /// Idempotent: re-adding an already-known peer is a no-op
-    /// (HashSet semantics). MED-009 (commit 052): backed by
+    /// (HashSet semantics). MED-009: backed by
     /// `HashSet<String>` so the dedup check is `O(1)` instead
     /// of `O(n)`.
     pub fn add_peer(&mut self, peer_id: String) {
@@ -366,7 +366,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Pre-existing CRIT-009 adversarial tests (commit 008)
+    // Pre-existing CRIT-009 adversarial tests
     // ========================================================================
 
     #[test]
@@ -606,7 +606,7 @@ mod tests {
     }
 
     // ============================================================
-    // MED-009 (commit 052) — peers backed by HashSet for O(1)
+    // MED-009 — peers backed by HashSet for O(1)
     // dedup. Pre-fix `Vec<String>` did `.contains()` linear scan
     // per add; bursts of N adds were O(N²).
     // ============================================================

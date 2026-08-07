@@ -1,6 +1,6 @@
 //! Escrow contract for Arxia.
 //!
-//! # Reentrancy safety (LOW-012, commit 083)
+//! # Reentrancy safety (LOW-012)
 //!
 //! Both [`Escrow::release`] and [`Escrow::refund`] follow a
 //! **check-effects-no-interaction** pattern:
@@ -102,8 +102,9 @@ impl Escrow {
         Ok(buf)
     }
 
-    /// Canonical release-authorization message. See commit 009 doc for
-    /// full layout (23 + 80 = 103 bytes).
+    /// Canonical release-authorization message; full layout is
+    /// 23 + 80 = 103 bytes (domain prefix + payload, documented on
+    /// the fields below).
     pub fn release_message(&self) -> Result<Vec<u8>, &'static str> {
         let mut msg = Vec::with_capacity(ESCROW_RELEASE_DOMAIN.len() + 80);
         msg.extend_from_slice(ESCROW_RELEASE_DOMAIN);
@@ -127,7 +128,7 @@ impl Escrow {
         Ok(msg)
     }
 
-    /// Release funds to the recipient (commit 009 contract).
+    /// Release funds to the recipient.
     pub fn release(
         &mut self,
         caller_pubkey: &[u8; 32],
@@ -442,7 +443,7 @@ mod tests {
     }
 
     // ============================================================
-    // LOW-012 (commit 083) — reentrancy safety probes.
+    // LOW-012 — reentrancy safety probes.
     //
     // The state-machine pattern (Locked → Released/Refunded) is
     // the reentrancy guard. A second call to release/refund on
