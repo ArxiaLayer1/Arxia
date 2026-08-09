@@ -12,6 +12,7 @@ members = [
     "crates/arxia-wasm",
     "crates/arxia-storage",
     "crates/arxia-storage-redb",
+    "crates/arxia-storage-flash",
     "crates/arxia-relay",
     "crates/arxia-finality",
     "crates/arxia-proto",
@@ -62,6 +63,7 @@ criterion = { version = "0.7", features = ["html_reports"] }
 rand = "0.10.2"
 thiserror = "2.0"
 redb = "4.1"
+sequential-storage = { version = "8.0.1", default-features = false }
 tempfile = "3"
 bs58 = "0.5"
 
@@ -77,6 +79,7 @@ arxia-relay = { path = "crates/arxia-relay" }
 arxia-did = { path = "crates/arxia-did" }
 arxia-storage = { path = "crates/arxia-storage" }
 arxia-storage-redb = { path = "crates/arxia-storage-redb" }
+arxia-storage-flash = { path = "crates/arxia-storage-flash" }
 arxia-proto = { path = "crates/arxia-proto" }
 
 [profile.release]

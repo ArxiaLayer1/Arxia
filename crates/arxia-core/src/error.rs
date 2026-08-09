@@ -473,6 +473,31 @@ pub enum StorageFault {
     /// or tampering.
     #[error("checksum mismatch: the Blake3 prefix does not match the value bytes")]
     ChecksumMismatch,
+    /// A flash driver returned `Poll::Pending` where the backend
+    /// requires completion on a single poll.
+    ///
+    /// The embedded backend bridges an async storage library to this
+    /// synchronous trait by polling each future exactly once, which is
+    /// sound only while the underlying flash driver completes
+    /// synchronously. A `Pending` therefore never means "wait" here —
+    /// it means that assumption no longer holds, and the backend
+    /// surfaces it immediately rather than spinning, which would hang
+    /// a node in silence.
+    #[error("the flash driver would block; the single-poll assumption no longer holds")]
+    WouldBlock,
+
+    /// A key or value exceeded the fixed capacity an embedded backend
+    /// can hold without allocating.
+    #[error("{what} of {got} bytes exceeds the backend limit of {limit}")]
+    CapacityExceeded {
+        /// Which item overflowed.
+        what: CapacityKind,
+        /// The size supplied.
+        got: usize,
+        /// The backend's fixed limit.
+        limit: usize,
+    },
+
     /// The backing engine reported a fault of its own (I/O error,
     /// internal corruption, transaction failure).
     ///
@@ -508,6 +533,18 @@ pub enum BlockField {
     /// The credential hash field of a Revoke.
     #[error("credential_hash")]
     CredentialHash,
+}
+
+/// What overflowed a fixed embedded capacity, for
+/// [`StorageFault::CapacityExceeded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CapacityKind {
+    /// A storage key.
+    #[error("key")]
+    Key,
+    /// A stored value.
+    #[error("value")]
+    Value,
 }
 
 /// The specific fault behind an [`ArxiaError::SignatureInvalid`].
