@@ -244,3 +244,13 @@ so a batch costs twice its payload in flash appends, and the
 section-5 erase predictions for batch-heavy scenarios scale
 accordingly. The journal and marker items are themselves reclaimed
 by compaction like any other overwritten item.
+
+**Recovery cost.** On the clean path a batch performs no recovery
+reads at all: a RAM flag records that the journal is clean, set at
+mount and after every successful batch [derived - the flag is one
+`Cell<bool>`]. Only after an actual failure does the next operation
+scan the log to finish or discard the interrupted batch, which costs
+one full-log read - `n_log` item reads - per recovery attempt
+[derived]. Mount always runs one such scan. The bench should see
+zero recovery overhead in steady state; a recovery read appearing in
+a steady-state trace is a failure being retried, not bookkeeping.
