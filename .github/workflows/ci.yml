@@ -84,5 +84,5 @@ jobs:
       # dependency (or a std usage) sneaking back in fails here, not
       # on the bench. The conformance feature is built too, because
       # the flash backend will be held to that suite on this target.
-      - run: cargo build -p arxia-core -p arxia-crypto -p arxia-storage --no-default-features --target riscv32imc-unknown-none-elf
+      - run: cargo build -p arxia-core -p arxia-crypto -p arxia-storage -p arxia-storage-flash --no-default-features --target riscv32imc-unknown-none-elf
       - run: cargo build -p arxia-storage --no-default-features --features conformance --target riscv32imc-unknown-none-elf
