@@ -50,6 +50,8 @@ flash_conformance!(
     check_interleaved_ops_resolve_in_slice_order,
     check_deleting_an_absent_key_in_a_batch_is_not_an_error,
     check_an_empty_batch_is_a_no_op,
+    check_a_batch_carries_a_protocol_sized_block,
+    check_a_transfer_sized_batch_applies_atomically,
 );
 
 /// The same drift guard the other backends carry: a check added to
@@ -58,7 +60,7 @@ flash_conformance!(
 #[test]
 fn every_registered_check_passes() {
     let checks = conformance::all_checks::<FlashStorage<Flash>>();
-    assert_eq!(checks.len(), 14, "wrapper list above may be stale");
+    assert_eq!(checks.len(), 16, "wrapper list above may be stale");
     for (_name, check) in checks {
         let mut store = fresh();
         check(&mut store);
@@ -85,7 +87,10 @@ fn an_overwritten_key_is_emitted_once_with_the_live_value() {
         vec![(b"k:1".to_vec(), b"second".to_vec())],
         "one entry, the live one"
     );
-    assert_eq!(s.get(b"k:1").unwrap().as_deref(), Some(b"second".as_slice()));
+    assert_eq!(
+        s.get(b"k:1").unwrap().as_deref(),
+        Some(b"second".as_slice())
+    );
 }
 
 /// Several overwrites of several keys, interleaved: every key appears

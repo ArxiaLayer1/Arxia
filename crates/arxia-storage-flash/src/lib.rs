@@ -105,13 +105,13 @@ use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::future::Future;
 use core::pin::pin;
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, Waker};
 
 use arxia_core::{ArxiaError, CapacityKind, StorageFault};
 use arxia_storage::{BatchOp, StorageBackend};
+use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::cache::{Cache, Uncached};
 use sequential_storage::map::{Key, MapConfig, MapStorage, SerializationError};
-use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 
 /// Longest key this backend stores. Arxia's longest key today is a
 /// per-account chain key (`c:` + 64 hex chars + `:` + nonce), which
@@ -132,30 +132,6 @@ pub const SCAN_WINDOW: usize = 8;
 
 // ----------------------------------------------------- single-poll bridge
 
-#[allow(unsafe_code)]
-mod noop_waker {
-    //! A waker that does nothing, because nothing ever wakes: the
-    //! bridge polls once and treats `Pending` as a fault. The two
-    //! `unsafe` blocks build a vtable whose every entry is a no-op
-    //! over a null pointer that is never dereferenced.
-    use core::task::{RawWaker, RawWakerVTable, Waker};
-
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(core::ptr::null(), &VTABLE),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
-
-    pub(super) fn waker() -> Waker {
-        // SAFETY: every vtable entry is a no-op and the data pointer
-        // is never dereferenced, so the contract of `from_raw` (that
-        // the vtable functions are sound for this data pointer) holds
-        // vacuously.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) }
-    }
-}
-
 /// Drive a future to completion with **exactly one poll**.
 ///
 /// Returns [`StorageFault::WouldBlock`] if the future pends. There is
@@ -165,8 +141,10 @@ mod noop_waker {
 /// silent hang.
 pub fn poll_once<F: Future>(future: F) -> Result<F::Output, ArxiaError> {
     let mut future = pin!(future);
-    let waker = noop_waker::waker();
-    let mut cx = Context::from_waker(&waker);
+    // `Waker::noop` has been stable since 1.85 and the workspace
+    // pins 1.89, so the crate needs no hand-rolled vtable and
+    // therefore no `unsafe` at all.
+    let mut cx = Context::from_waker(Waker::noop());
     match future.as_mut().poll(&mut cx) {
         Poll::Ready(value) => Ok(value),
         Poll::Pending => Err(ArxiaError::Storage {
@@ -275,6 +253,27 @@ const OP_PUT: u8 = 0x00;
 const OP_DELETE: u8 = 0x01;
 const MARKER_KEY: [u8; 2] = [RESERVED_PREFIX, MARKER_TAG];
 
+/// Largest journal entry: an operation tag, a key length, the key and
+/// a full-sized value. Deliberately larger than [`MAX_VALUE_LEN`],
+/// which bounds one user payload rather than one journal record.
+pub const JOURNAL_ENTRY_MAX: usize = 2 + MAX_KEY_LEN + MAX_VALUE_LEN;
+
+/// Refuse a key in the reserved namespace.
+///
+/// The journal lives under [`RESERVED_PREFIX`] and reads hide it, so a
+/// user key starting with that byte would be written, then hidden, then
+/// discarded by the next mount as uncommitted journal debris. Silently
+/// losing an accepted write is the worst outcome available, so the
+/// write is refused instead.
+fn reject_reserved(key: &[u8]) -> Result<(), ArxiaError> {
+    if key.first() == Some(&RESERVED_PREFIX) {
+        return Err(ArxiaError::Storage {
+            fault: StorageFault::ReservedKey,
+        });
+    }
+    Ok(())
+}
+
 fn journal_key(seq: u32, index: u16) -> [u8; 8] {
     let s = seq.to_be_bytes();
     let i = index.to_be_bytes();
@@ -306,7 +305,12 @@ struct ScanWindow<const W: usize> {
 }
 
 impl<const W: usize> ScanWindow<W> {
+    /// A window of zero would make every pass empty and the scan
+    /// return nothing, silently. Refused at compile time.
+    const NON_ZERO: () = assert!(W > 0, "SCAN_WINDOW must be at least 1");
+
     fn new() -> Self {
+        let () = Self::NON_ZERO;
         Self {
             keys: [FlashKey {
                 bytes: [0u8; MAX_KEY_LEN],
@@ -363,7 +367,10 @@ impl<const W: usize> ScanWindow<W> {
     }
 
     fn entry(&self, i: usize) -> (&FlashKey, &[u8]) {
-        (&self.keys[i], &self.values[i][..self.value_lens[i] as usize])
+        (
+            &self.keys[i],
+            &self.values[i][..self.value_lens[i] as usize],
+        )
     }
 }
 
@@ -375,7 +382,7 @@ struct Inner<S: MultiwriteNorFlash, const W: usize> {
     map: MapStorage<FlashKey, S, FlashCache>,
     /// Item buffer for the library. Sized for the longest key plus the
     /// longest value plus their framing.
-    buffer: [u8; MAX_KEY_LEN + MAX_VALUE_LEN + 16],
+    buffer: [u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32],
     window: ScanWindow<W>,
 }
 
@@ -399,7 +406,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         let mut store = Self {
             inner: RefCell::new(Inner {
                 map: MapStorage::new(flash, config, Cache::new_uncached()),
-                buffer: [0u8; MAX_KEY_LEN + MAX_VALUE_LEN + 16],
+                buffer: [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32],
                 window: ScanWindow::new(),
             }),
         };
@@ -420,7 +427,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// must be replayed; a journal without a marker means the batch
     /// never reached its commit point and is discarded.
     fn recover(&mut self) -> Result<(), ArxiaError> {
-        match self.fetch(&MARKER_KEY)? {
+        match self.fetch_raw(&MARKER_KEY)? {
             Some(b) if b.len() == 6 => {
                 let seq = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
                 let count = u16::from_be_bytes([b[4], b[5]]);
@@ -448,7 +455,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     fn replay_journal(&mut self, seq: u32, count: u16) -> Result<(), ArxiaError> {
         for index in 0..count {
             let jkey = journal_key(seq, index);
-            if let Some(entry) = self.fetch(&jkey)? {
+            if let Some(entry) = self.fetch_raw(&jkey)? {
                 apply_encoded_op(self, &entry)?;
             }
         }
@@ -465,7 +472,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         {
             let mut inner = self.inner.borrow_mut();
             let Inner { map, buffer, .. } = &mut *inner;
-            let mut iter_buffer = [0u8; MAX_KEY_LEN + MAX_VALUE_LEN + 16];
+            let mut iter_buffer = [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32];
             let mut iter =
                 poll_once(map.fetch_all_items(&mut iter_buffer))?.map_err(backend_fault)?;
             while let Some((key, _)) =
@@ -490,10 +497,8 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// The next batch sequence: one past whatever the marker last
     /// named, so a replayed journal never collides with a new one.
     fn next_sequence(&self) -> Result<u32, ArxiaError> {
-        Ok(match self.fetch(&MARKER_KEY)? {
-            Some(b) if b.len() >= 4 => {
-                u32::from_be_bytes([b[0], b[1], b[2], b[3]]).wrapping_add(1)
-            }
+        Ok(match self.fetch_raw(&MARKER_KEY)? {
+            Some(b) if b.len() >= 4 => u32::from_be_bytes([b[0], b[1], b[2], b[3]]).wrapping_add(1),
             _ => 1,
         })
     }
@@ -505,7 +510,28 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         self.inner.into_inner().map.destroy().0
     }
 
+    /// Read a user key. Journal bookkeeping is invisible here, exactly
+    /// as it is to a scan: a failed batch may leave entries behind
+    /// until the next mount discards them, and no reader may see them.
     fn fetch(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError> {
+        reject_reserved(key)?;
+        self.fetch_raw(key)
+    }
+
+    /// Presence without materialising the value: `delete` and
+    /// `contains` only need the answer, and a 193-byte block copied
+    /// onto the heap to be dropped immediately is waste a 520 KB
+    /// device notices.
+    fn exists(&self, key: &[u8]) -> Result<bool, ArxiaError> {
+        reject_reserved(key)?;
+        let k = FlashKey::new(key)?;
+        let mut inner = self.inner.borrow_mut();
+        let Inner { map, buffer, .. } = &mut *inner;
+        let found = poll_once(map.fetch_item::<&[u8]>(buffer, &k))?.map_err(backend_fault)?;
+        Ok(found.is_some())
+    }
+
+    fn fetch_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError> {
         let k = FlashKey::new(key)?;
         let mut inner = self.inner.borrow_mut();
         let Inner { map, buffer, .. } = &mut *inner;
@@ -513,10 +539,26 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         Ok(found.map(|v| v.to_vec()))
     }
 
+    /// Store a user value: the payload cap and the reserved-namespace
+    /// rule both apply here, and only here.
     fn store(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
         if value.len() > MAX_VALUE_LEN {
             return Err(capacity(CapacityKind::Value, value.len(), MAX_VALUE_LEN));
         }
+        reject_reserved(key)?;
+        self.store_raw(key, value)
+    }
+
+    /// Store without the user-facing checks.
+    ///
+    /// The journal needs this: a journal entry is a whole operation —
+    /// tag, key and value — so it is necessarily larger than the value
+    /// cap that bounds one user payload. Capping the entry at
+    /// MAX_VALUE_LEN would reject a batch carrying a 193-byte block
+    /// under a chain key, which is the crate's whole reason to exist.
+    /// Journal keys are also reserved by construction, so the
+    /// namespace check must not fire on them.
+    fn store_raw(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
         let k = FlashKey::new(key)?;
         let inner = self.inner.get_mut();
         let Inner { map, buffer, .. } = inner;
@@ -541,7 +583,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<bool, ArxiaError> {
-        let existed = self.fetch(key)?.is_some();
+        let existed = self.exists(key)?;
         if existed {
             self.erase(key)?;
         }
@@ -549,7 +591,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
     }
 
     fn contains(&self, key: &[u8]) -> Result<bool, ArxiaError> {
-        Ok(self.fetch(key)?.is_some())
+        self.exists(key)
     }
 
     fn scan_prefix(
@@ -568,7 +610,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                 } = &mut *inner;
                 window.clear();
 
-                let mut iter_buffer = [0u8; MAX_KEY_LEN + MAX_VALUE_LEN + 16];
+                let mut iter_buffer = [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32];
                 let mut iter =
                     poll_once(map.fetch_all_items(&mut iter_buffer))?.map_err(backend_fault)?;
                 while let Some((key, value)) =
@@ -591,19 +633,30 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                 }
             }
 
-            let inner = self.inner.borrow();
-            if inner.window.len == 0 {
-                return Ok(());
-            }
-            let count = inner.window.len;
-            let final_key = inner.window.keys[count - 1];
-            for i in 0..count {
-                let (k, v) = inner.window.entry(i);
-                if !visit(k.as_slice(), v) {
+            // Copy the window out before calling `visit`: the callback
+            // is user code and may read this very store, which would
+            // panic on a RefCell already borrowed here. The struct's
+            // own documentation promises the cell is never held across
+            // a call into user code, and this is what keeps it true.
+            let (batch, final_key) = {
+                let inner = self.inner.borrow();
+                if inner.window.len == 0 {
+                    return Ok(());
+                }
+                let count = inner.window.len;
+                let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(count);
+                for i in 0..count {
+                    let (k, v) = inner.window.entry(i);
+                    out.push((k.as_slice().to_vec(), v.to_vec()));
+                }
+                (out, inner.window.keys[count - 1])
+            };
+
+            for (k, v) in &batch {
+                if !visit(k, v) {
                     return Ok(());
                 }
             }
-            drop(inner);
             last_emitted = Some(final_key);
         }
     }
@@ -613,7 +666,11 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
             return Ok(());
         }
         if ops.len() > u16::MAX as usize {
-            return Err(capacity(CapacityKind::Value, ops.len(), u16::MAX as usize));
+            return Err(capacity(
+                CapacityKind::BatchOperations,
+                ops.len(),
+                u16::MAX as usize,
+            ));
         }
 
         // Validate every operation BEFORE writing anything: a batch
@@ -622,23 +679,32 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
             match op {
                 BatchOp::Put { key, value } => {
                     FlashKey::new(key)?;
+                    reject_reserved(key)?;
                     if value.len() > MAX_VALUE_LEN {
                         return Err(capacity(CapacityKind::Value, value.len(), MAX_VALUE_LEN));
                     }
                 }
                 BatchOp::Delete { key } => {
                     FlashKey::new(key)?;
+                    reject_reserved(key)?;
                 }
             }
         }
 
+        // A marker still on flash means an earlier batch committed but
+        // its replay did not finish - a transient failure, or a cut.
+        // Writing a new marker over it would strand that batch half
+        // applied for ever, so it is finished first. If it cannot be
+        // finished, this batch does not start.
+        self.recover()?;
+
         let seq = self.next_sequence()?;
 
         // Step 1: journal every operation.
-        let mut encoded = [0u8; MAX_KEY_LEN + MAX_VALUE_LEN + 2];
+        let mut encoded = [0u8; JOURNAL_ENTRY_MAX];
         for (index, op) in ops.iter().enumerate() {
             let n = encode_op(op, &mut encoded);
-            self.store(&journal_key(seq, index as u16), &encoded[..n])?;
+            self.store_raw(&journal_key(seq, index as u16), &encoded[..n])?;
         }
 
         // Step 2: the commit point. Before this single write the batch
@@ -650,7 +716,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         let mut marker = [0u8; 6];
         marker[..4].copy_from_slice(&seq.to_be_bytes());
         marker[4..].copy_from_slice(&count.to_be_bytes());
-        self.store(&MARKER_KEY, &marker)?;
+        self.store_raw(&MARKER_KEY, &marker)?;
 
         // Steps 3 and 4.
         self.replay_journal(seq, count)

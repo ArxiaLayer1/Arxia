@@ -204,6 +204,8 @@ mod memory_storage {
         check_interleaved_ops_resolve_in_slice_order,
         check_deleting_an_absent_key_in_a_batch_is_not_an_error,
         check_an_empty_batch_is_a_no_op,
+        check_a_batch_carries_a_protocol_sized_block,
+        check_a_transfer_sized_batch_applies_atomically,
     );
 
     /// Belt-and-braces: iterate `all_checks` too, so a check added to
@@ -213,7 +215,7 @@ mod memory_storage {
     #[test]
     fn every_registered_check_passes() {
         let checks = conformance::all_checks::<MemoryStorage>();
-        assert_eq!(checks.len(), 14, "wrapper list above may be stale");
+        assert_eq!(checks.len(), 16, "wrapper list above may be stale");
         for (_name, check) in checks {
             let mut fresh = MemoryStorage::new();
             check(&mut fresh);

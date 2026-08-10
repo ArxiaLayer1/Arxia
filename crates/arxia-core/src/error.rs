@@ -498,6 +498,14 @@ pub enum StorageFault {
         limit: usize,
     },
 
+    /// A write targeted a key the backend reserves for its own
+    /// bookkeeping. Refused rather than accepted-then-hidden: an
+    /// embedded backend keeps its journal in a reserved key namespace,
+    /// and a user write landing there would be invisible to reads and
+    /// discarded by the next mount, losing an accepted write.
+    #[error("the key lies in the backend's reserved namespace")]
+    ReservedKey,
+
     /// The backing engine reported a fault of its own (I/O error,
     /// internal corruption, transaction failure).
     ///
@@ -545,6 +553,9 @@ pub enum CapacityKind {
     /// A stored value.
     #[error("value")]
     Value,
+    /// The number of operations in one batch.
+    #[error("batch operation count")]
+    BatchOperations,
 }
 
 /// The specific fault behind an [`ArxiaError::SignatureInvalid`].

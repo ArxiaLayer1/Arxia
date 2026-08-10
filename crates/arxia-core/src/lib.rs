@@ -18,7 +18,10 @@ pub mod error;
 pub mod types;
 
 pub use constants::*;
-pub use error::{ArxiaError, BlockField, CapacityKind, DidFault, GenesisRule, HexFaultKind, KeyFault, SerializedItem, SignatureFault, StorageFault, TransportFault};
+pub use error::{
+    ArxiaError, BlockField, CapacityKind, DidFault, GenesisRule, HexFaultKind, KeyFault,
+    SerializedItem, SignatureFault, StorageFault, TransportFault,
+};
 pub use types::*;
 
 // ============================================================
