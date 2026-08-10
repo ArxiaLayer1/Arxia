@@ -347,10 +347,15 @@ pub fn batch_atomicity_holds<B: StorageBackend>(b: &mut B) -> bool {
 pub type NamedCheck<B> = (&'static str, fn(&mut B));
 
 /// A protocol-sized value: the compact block is 193 bytes, and a
+/// backend test anywhere in the workspace should reach for this
+/// instead of minting its own copy - the sizes are part of what the
+/// suite tests, and copies drift.
+///
+/// Original rationale: a
 /// backend that only ever sees three-byte test payloads can hide a
 /// capacity bug that fires on the very first real block. Every batch
 /// check below carries one.
-fn realistic_value(tag: u8) -> Vec<u8> {
+pub fn realistic_value(tag: u8) -> Vec<u8> {
     let mut v = vec![tag; 193];
     v[0] = 0xAB; // a marker so a truncated write is visible
     v
@@ -358,7 +363,7 @@ fn realistic_value(tag: u8) -> Vec<u8> {
 
 /// A protocol-sized key: `c:` plus a 64-hex-char account plus a nonce
 /// suffix is what an account-chain key actually looks like.
-fn realistic_key(suffix: &str) -> Vec<u8> {
+pub fn realistic_key(suffix: &str) -> Vec<u8> {
     let mut k = b"c:".to_vec();
     k.extend_from_slice(&[b'a'; 64]);
     k.push(b':');

@@ -285,9 +285,29 @@ fn a_reserved_key_is_refused_typed_and_nothing_is_lost() {
         refused(s.apply_batch(&[arxia_storage::BatchOp::Delete { key: b"\x00evil" }])),
         "a batched delete of a reserved key is refused as well"
     );
+    // Reads are TOTAL, per the review arbitration: the namespace can
+    // never hold user data, so reading it answers "absent" - exactly
+    // as the other backends do - and only writes refuse. delete is a
+    // write and refuses even though the answer would trivially be
+    // "not present": refusing beats teaching callers that writing
+    // into the namespace is sometimes acceptable.
+    assert_eq!(
+        s.get(b"\x00evil").unwrap(),
+        None,
+        "get on the namespace is total: Ok(None), never an error"
+    );
     assert!(
-        s.get(b"\x00evil").is_err(),
-        "reads do not reach the namespace"
+        !s.contains(b"\x00evil").unwrap(),
+        "contains on the namespace is total: Ok(false)"
+    );
+    assert!(
+        matches!(
+            s.delete(b"\x00evil"),
+            Err(ArxiaError::Storage {
+                fault: StorageFault::ReservedKey
+            })
+        ),
+        "delete is a write and refuses, typed"
     );
 
     // The remount that used to destroy the evidence: the legitimate

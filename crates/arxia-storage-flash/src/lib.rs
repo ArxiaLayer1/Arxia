@@ -59,12 +59,13 @@
 //! same construction the redb kill-nine harness validates:
 //!
 //! 1. every operation of the batch is written under the reserved
-//!    journal prefix, keyed by sequence and index;
-//! 2. a marker naming that sequence is written - this single item is
-//!    the commit point;
-//! 3. every operation is applied to its real key - all of them,
-//!    before any journal entry is removed;
-//! 4. the journal is cleared, and the marker last of all.
+//!    journal prefix, keyed by its index;
+//! 2. a marker naming the operation count is written - this single
+//!    item is the commit point;
+//! 3. each operation is applied to its real key and its journal
+//!    entry erased, in order - safe because the count in the marker
+//!    makes an already-erased entry a no-op, not an early stop;
+//! 4. the marker is cleared last of all.
 //!
 //! A power cut before step 2 leaves a journal with no marker, which
 //! mount discards: the batch never happened. A cut after step 2 leaves
@@ -73,8 +74,26 @@
 //! idempotent, because a put and a delete both are. There is no window
 //! where a proper subset of the batch is visible after recovery.
 //!
-//! The price is one extra write per operation, which the endurance
-//! model counts: a batch costs twice its payload in flash appends.
+//! The journal doubles as the capacity reservation. An applied item
+//! is strictly smaller than its journal entry, and the entry dies as
+//! its item lands, so the replay never holds more live data than the
+//! journaling phase already fit: a batch that cannot fit fails
+//! *before* its commit point, and a committed batch cannot run out
+//! of space while applying. The price is one extra write per
+//! operation, which the endurance model counts: a batch costs twice
+//! its payload in flash appends.
+//!
+//! # Failure policy
+//!
+//! A batch that fails before its commit point never happened; its
+//! journal debris is invisible to every read and discarded by the
+//! next recovery. A transient fault after the commit point gets one
+//! inline retry; if that fails too, the store is marked dirty and
+//! every subsequent operation - reads included - runs recovery
+//! before touching it. A reader therefore observes a batch before or
+//! after, never in between: while the flash refuses recovery, reads
+//! fail rather than serve a mixture, and the first operation after
+//! the flash heals converges the store.
 //!
 //! # Known limits
 //!
@@ -89,9 +108,18 @@
 //!   write-once NOR part cannot do. The ESP32's SPI NOR flash
 //!   qualifies; the bound makes a part that does not a compile error
 //!   rather than a runtime surprise.
-//! - Keys beginning with [`RESERVED_PREFIX`] belong to the journal
-//!   and are invisible to reads and scans. Arxia's own keys are
-//!   printable ASCII (`c:`, `s:`), so the namespace is free.
+//! - Keys beginning with [`RESERVED_PREFIX`] belong to the journal.
+//!   Reads are total there - `get` answers `None`, `contains` and
+//!   scans answer as if the key does not exist, matching the other
+//!   backends - while writes refuse with
+//!   [`StorageFault::ReservedKey`], because only a write into the
+//!   namespace could lose data. Arxia's own keys are printable ASCII
+//!   (`c:`, `s:`), so the namespace is free.
+//! - A flash that keeps faulting after a batch committed leaves the
+//!   store refusing every operation until it heals; the batch then
+//!   lands on the first access. Nothing can be served in between -
+//!   that is the fail-safe choice for a ledger, not an optimisation
+//!   target.
 //! - Nothing in the node is wired to this backend yet.
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -274,20 +302,13 @@ fn reject_reserved(key: &[u8]) -> Result<(), ArxiaError> {
     Ok(())
 }
 
-fn journal_key(seq: u32, index: u16) -> [u8; 8] {
-    let s = seq.to_be_bytes();
+fn journal_key(index: u16) -> [u8; 4] {
     let i = index.to_be_bytes();
-    [
-        RESERVED_PREFIX,
-        JOURNAL_TAG,
-        s[0],
-        s[1],
-        s[2],
-        s[3],
-        i[0],
-        i[1],
-    ]
+    [RESERVED_PREFIX, JOURNAL_TAG, i[0], i[1]]
 }
+
+/// Journal entry key length, shared by the writer and the discard scan.
+const JOURNAL_KEY_LEN: usize = 4;
 
 // ------------------------------------------------------ the scan window
 
@@ -393,6 +414,14 @@ struct Inner<S: MultiwriteNorFlash, const W: usize> {
 /// never held across a call into user code.
 pub struct FlashStorage<S: MultiwriteNorFlash, const W: usize = SCAN_WINDOW> {
     inner: RefCell<Inner<S, W>>,
+    /// True while the journal may hold state a reader must not see: a
+    /// batch failed mid-flight, or its committed replay did not
+    /// finish. Every public operation checks this first and runs
+    /// recovery before touching the store, so no caller can observe a
+    /// half-applied batch. On the clean path the check is one RAM
+    /// read: recovery scans the log only after an actual failure,
+    /// which keeps it out of the per-batch cost model.
+    dirty: core::cell::Cell<bool>,
 }
 
 impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
@@ -403,12 +432,13 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// surfaces the failure rather than panicking.
     pub fn mount(flash: S, flash_range: core::ops::Range<u32>) -> Result<Self, ArxiaError> {
         let config = MapConfig::try_new(flash_range).map_err(backend_fault)?;
-        let mut store = Self {
+        let store = Self {
             inner: RefCell::new(Inner {
                 map: MapStorage::new(flash, config, Cache::new_uncached()),
                 buffer: [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32],
                 window: ScanWindow::new(),
             }),
+            dirty: core::cell::Cell::new(false),
         };
         store.recover()?;
         Ok(store)
@@ -420,55 +450,87 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         core::cell::RefMut::map(self.inner.borrow_mut(), |i| i.map.flash())
     }
 
-    /// Finish or discard any batch interrupted by a power cut.
+    /// Run recovery if a previous failure may have left journal state
+    /// behind. The clean path costs one RAM read and nothing else.
+    fn ensure_clean(&self) -> Result<(), ArxiaError> {
+        if !self.dirty.get() {
+            return Ok(());
+        }
+        self.recover()?;
+        self.dirty.set(false);
+        Ok(())
+    }
+
+    /// Finish or discard any batch interrupted by a power cut or an
+    /// earlier failure.
     ///
-    /// Called by [`Self::mount`], so a store is consistent before its
-    /// first read. A marker means the batch committed and its journal
-    /// must be replayed; a journal without a marker means the batch
-    /// never reached its commit point and is discarded.
-    fn recover(&mut self) -> Result<(), ArxiaError> {
+    /// Called by [`Self::mount`] and by [`Self::ensure_clean`], so a
+    /// store is consistent before anything reads it. A well-formed
+    /// marker means the batch committed and its journal must be
+    /// replayed. A journal without a marker means the batch never
+    /// reached its commit point and is discarded. A *malformed*
+    /// marker (a torn write the CRC let through at some other length)
+    /// never named a replayable batch, so it is discarded along with
+    /// the journal - leaving it behind would make every future
+    /// recovery re-read garbage for ever.
+    fn recover(&self) -> Result<(), ArxiaError> {
         match self.fetch_raw(&MARKER_KEY)? {
-            Some(b) if b.len() == 6 => {
-                let seq = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-                let count = u16::from_be_bytes([b[4], b[5]]);
-                self.replay_journal(seq, count)
+            Some(b) if b.len() == 2 => {
+                let count = u16::from_be_bytes([b[0], b[1]]);
+                self.replay_journal(count)
             }
-            _ => self.discard_journal(),
+            Some(_) => {
+                self.discard_journal()?;
+                self.erase(&MARKER_KEY)
+            }
+            None => self.discard_journal(),
         }
     }
 
-    /// Apply a committed journal in order, then clear it and the
-    /// marker.
+    /// Apply a committed journal in order, then clear the marker.
     ///
-    /// Every entry is applied before any entry is erased. Erasing as
-    /// the replay went would lose the batch: a cut after entry 0 was
-    /// applied and erased leaves a journal whose first index is absent,
-    /// and a replay that stopped at the first gap would call the batch
-    /// finished with operations 1 and 2 never applied. That is a
-    /// partial batch, which the trait forbids — and it is what the
-    /// power-cut sweep caught before this ordering was fixed.
+    /// Each entry is applied and then erased before the next one is
+    /// touched. That order is safe only because the marker carries
+    /// the operation count: an early version without the count
+    /// stopped replaying at the first missing index and declared a
+    /// half-applied batch finished, which the power-cut sweep caught.
+    /// With the count, a gap is just an entry that already landed.
     ///
-    /// Both phases are idempotent: re-applying a put or a delete
-    /// reaches the same state, and erasing an absent key is not an
-    /// error. The marker goes last, so while it exists recovery
-    /// repeats, and a cut anywhere inside recovery simply replays.
-    fn replay_journal(&mut self, seq: u32, count: u16) -> Result<(), ArxiaError> {
+    /// Erase-as-you-go is also what makes the replay immune to
+    /// running out of space. An applied item is strictly smaller than
+    /// its journal entry (same key and value, minus the journal
+    /// framing), and the entry dies as soon as its item lands, so the
+    /// live set during replay never exceeds what the journaling phase
+    /// already fit. The journal IS the capacity reservation: a batch
+    /// whose journal and marker landed cannot fail to apply for
+    /// space, and a batch that cannot fit fails before its commit
+    /// point with nothing to clean but invisible debris.
+    ///
+    /// Every error propagates. The storage library returns Ok when
+    /// asked to remove an absent key (verified in its source at the
+    /// pinned version), so any error out of an erase here is a real
+    /// fault - swallowing it would let a transient fault end a replay
+    /// early, report success, and strand the rest of the batch with
+    /// the journal cleared: an unrecoverable partial application.
+    ///
+    /// Both phases are idempotent, and the marker goes last: while it
+    /// exists recovery repeats, so a cut or a fault anywhere inside
+    /// recovery is retried by the next one.
+    fn replay_journal(&self, count: u16) -> Result<(), ArxiaError> {
         for index in 0..count {
-            let jkey = journal_key(seq, index);
+            let jkey = journal_key(index);
             if let Some(entry) = self.fetch_raw(&jkey)? {
                 apply_encoded_op(self, &entry)?;
+                self.erase(&jkey)?;
             }
-        }
-        for index in 0..count {
-            self.erase(&journal_key(seq, index))?;
         }
         self.erase(&MARKER_KEY)?;
         Ok(())
     }
 
     /// Remove journal entries left by a batch that never committed.
-    fn discard_journal(&mut self) -> Result<(), ArxiaError> {
-        let mut stale: Vec<[u8; 8]> = Vec::new();
+    fn discard_journal(&self) -> Result<(), ArxiaError> {
+        let mut stale: Vec<[u8; JOURNAL_KEY_LEN]> = Vec::new();
         {
             let mut inner = self.inner.borrow_mut();
             let Inner { map, buffer, .. } = &mut *inner;
@@ -479,8 +541,8 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
                 poll_once(iter.next::<&[u8]>(buffer))?.map_err(backend_fault)?
             {
                 let k = key.as_slice();
-                if k.len() == 8 && k[0] == RESERVED_PREFIX && k[1] == JOURNAL_TAG {
-                    let mut owned = [0u8; 8];
+                if k.len() == JOURNAL_KEY_LEN && k[0] == RESERVED_PREFIX && k[1] == JOURNAL_TAG {
+                    let mut owned = [0u8; JOURNAL_KEY_LEN];
                     owned.copy_from_slice(k);
                     if !stale.contains(&owned) {
                         stale.push(owned);
@@ -494,15 +556,6 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         Ok(())
     }
 
-    /// The next batch sequence: one past whatever the marker last
-    /// named, so a replayed journal never collides with a new one.
-    fn next_sequence(&self) -> Result<u32, ArxiaError> {
-        Ok(match self.fetch_raw(&MARKER_KEY)? {
-            Some(b) if b.len() >= 4 => u32::from_be_bytes([b[0], b[1], b[2], b[3]]).wrapping_add(1),
-            _ => 1,
-        })
-    }
-
     /// Consume the store and return the flash, so a caller can
     /// remount the same medium — which is what a board does when power
     /// comes back.
@@ -510,11 +563,16 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         self.inner.into_inner().map.destroy().0
     }
 
-    /// Read a user key. Journal bookkeeping is invisible here, exactly
-    /// as it is to a scan: a failed batch may leave entries behind
-    /// until the next mount discards them, and no reader may see them.
+    /// Read a user key. Reads are total: a key in the reserved
+    /// namespace can never hold user data, so it is simply absent -
+    /// `Ok(None)` - exactly as it is on the other backends. Only
+    /// writes refuse the namespace, because only a write there could
+    /// lose data.
     fn fetch(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError> {
-        reject_reserved(key)?;
+        self.ensure_clean()?;
+        if key.first() == Some(&RESERVED_PREFIX) {
+            return Ok(None);
+        }
         self.fetch_raw(key)
     }
 
@@ -523,7 +581,10 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// onto the heap to be dropped immediately is waste a 520 KB
     /// device notices.
     fn exists(&self, key: &[u8]) -> Result<bool, ArxiaError> {
-        reject_reserved(key)?;
+        self.ensure_clean()?;
+        if key.first() == Some(&RESERVED_PREFIX) {
+            return Ok(false);
+        }
         let k = FlashKey::new(key)?;
         let mut inner = self.inner.borrow_mut();
         let Inner { map, buffer, .. } = &mut *inner;
@@ -541,7 +602,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
 
     /// Store a user value: the payload cap and the reserved-namespace
     /// rule both apply here, and only here.
-    fn store(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
+    fn store(&self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
         if value.len() > MAX_VALUE_LEN {
             return Err(capacity(CapacityKind::Value, value.len(), MAX_VALUE_LEN));
         }
@@ -558,23 +619,24 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// under a chain key, which is the crate's whole reason to exist.
     /// Journal keys are also reserved by construction, so the
     /// namespace check must not fire on them.
-    fn store_raw(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
+    fn store_raw(&self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
         let k = FlashKey::new(key)?;
-        let inner = self.inner.get_mut();
-        let Inner { map, buffer, .. } = inner;
+        let mut inner = self.inner.borrow_mut();
+        let Inner { map, buffer, .. } = &mut *inner;
         poll_once(map.store_item(buffer, &k, &value))?.map_err(backend_fault)
     }
 
-    fn erase(&mut self, key: &[u8]) -> Result<(), ArxiaError> {
+    fn erase(&self, key: &[u8]) -> Result<(), ArxiaError> {
         let k = FlashKey::new(key)?;
-        let inner = self.inner.get_mut();
-        let Inner { map, buffer, .. } = inner;
+        let mut inner = self.inner.borrow_mut();
+        let Inner { map, buffer, .. } = &mut *inner;
         poll_once(map.remove_item(buffer, &k))?.map_err(backend_fault)
     }
 }
 
 impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
+        self.ensure_clean()?;
         self.store(key, value)
     }
 
@@ -583,6 +645,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<bool, ArxiaError> {
+        reject_reserved(key)?;
         let existed = self.exists(key)?;
         if existed {
             self.erase(key)?;
@@ -599,6 +662,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         prefix: &[u8],
         visit: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<(), ArxiaError> {
+        self.ensure_clean()?;
         let mut last_emitted: Option<FlashKey> = None;
         loop {
             {
@@ -705,35 +769,52 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
             }
         }
 
-        // A marker still on flash means an earlier batch committed but
-        // its replay did not finish - a transient failure, or a cut.
-        // Writing a new marker over it would strand that batch half
-        // applied for ever, so it is finished first. If it cannot be
-        // finished, this batch does not start.
-        self.recover()?;
+        // A pending marker means an earlier batch committed but its
+        // replay did not finish. Writing a new marker over it - and
+        // new journal entries over its journal - would strand that
+        // batch half applied for ever, so it is finished first. If it
+        // cannot be finished, this batch does not start.
+        self.ensure_clean()?;
 
-        let seq = self.next_sequence()?;
-
-        // Step 1: journal every operation.
+        // Step 1: journal every operation. A failure here leaves only
+        // markerless debris: invisible to every read, discarded by
+        // the next recovery, and the batch never happened.
         let mut encoded = [0u8; JOURNAL_ENTRY_MAX];
         for (index, op) in ops.iter().enumerate() {
             let n = encode_op(op, &mut encoded);
-            self.store_raw(&journal_key(seq, index as u16), &encoded[..n])?;
+            if let Err(e) = self.store_raw(&journal_key(index as u16), &encoded[..n]) {
+                self.dirty.set(true);
+                return Err(e);
+            }
         }
 
-        // Step 2: the commit point. Before this single write the batch
-        // does not exist; after it, the batch is guaranteed to land.
-        // The marker carries the operation count as well as the
-        // sequence: replay must know how many entries the batch had,
-        // because it cannot infer that from what is still on flash.
+        // Step 2: the commit point. Before this single write the
+        // batch does not exist; after it, the batch is guaranteed to
+        // land. The marker carries the operation count: replay must
+        // know how many entries the batch had, because it cannot
+        // infer that from what is still on flash.
         let count = ops.len() as u16;
-        let mut marker = [0u8; 6];
-        marker[..4].copy_from_slice(&seq.to_be_bytes());
-        marker[4..].copy_from_slice(&count.to_be_bytes());
-        self.store_raw(&MARKER_KEY, &marker)?;
+        if let Err(e) = self.store_raw(&MARKER_KEY, &count.to_be_bytes()) {
+            self.dirty.set(true);
+            return Err(e);
+        }
 
-        // Steps 3 and 4.
-        self.replay_journal(seq, count)
+        // Steps 3 and 4. A transient fault mid-replay gets one inline
+        // retry, so an `Err` from this method never leaves a committed
+        // batch half applied while the flash is answering: either the
+        // retry finishes the batch and this call reports the success
+        // it is, or the store is marked dirty and every subsequent
+        // operation runs recovery before touching it - a reader can
+        // observe the batch before or after, never in between.
+        match self.replay_journal(count) {
+            Ok(()) => Ok(()),
+            Err(_transient) => {
+                self.dirty.set(true);
+                self.recover()?;
+                self.dirty.set(false);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -760,8 +841,16 @@ fn encode_op(op: &BatchOp<'_>, out: &mut [u8]) -> usize {
 }
 
 /// Apply a journalled operation to its real key.
+///
+/// Every error propagates, the delete arm included: the storage
+/// library already returns Ok when asked to remove an absent key
+/// (verified in its source at the pinned version), so an error out of
+/// the erase can only be a real fault. An earlier version swallowed
+/// it in the name of "absent is fine" - a protection the library
+/// already provided - and thereby turned any transient fault on a
+/// batched delete into a silently partial batch.
 fn apply_encoded_op<S: MultiwriteNorFlash, const W: usize>(
-    store: &mut FlashStorage<S, W>,
+    store: &FlashStorage<S, W>,
     entry: &[u8],
 ) -> Result<(), ArxiaError> {
     if entry.len() < 2 {
@@ -774,12 +863,7 @@ fn apply_encoded_op<S: MultiwriteNorFlash, const W: usize>(
     let key = &entry[2..2 + key_len];
     match entry[0] {
         OP_PUT => store.store(key, &entry[2 + key_len..]),
-        OP_DELETE => {
-            // A delete of an absent key is not an error, and replay
-            // may well hit exactly that case.
-            let _ = store.erase(key);
-            Ok(())
-        }
+        OP_DELETE => store.erase(key),
         _ => Err(backend_fault("journal entry has an unknown op tag")),
     }
 }

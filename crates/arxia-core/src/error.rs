@@ -488,7 +488,7 @@ pub enum StorageFault {
 
     /// A key or value exceeded the fixed capacity an embedded backend
     /// can hold without allocating.
-    #[error("{what} of {got} bytes exceeds the backend limit of {limit}")]
+    #[error("{what} of {got} exceeds the backend limit of {limit}")]
     CapacityExceeded {
         /// Which item overflowed.
         what: CapacityKind,
@@ -548,12 +548,14 @@ pub enum BlockField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CapacityKind {
     /// A storage key.
-    #[error("key")]
+    #[error("key length in bytes")]
     Key,
     /// A stored value.
-    #[error("value")]
+    #[error("value length in bytes")]
     Value,
-    /// The number of operations in one batch.
+    /// The number of operations in one batch. The unit lives in each
+    /// kind, not in the parent message: a count rendered as "bytes"
+    /// would be nonsense, and each kind knows what it measures.
     #[error("batch operation count")]
     BatchOperations,
 }
