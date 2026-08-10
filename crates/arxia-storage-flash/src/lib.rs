@@ -652,6 +652,20 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                 (out, inner.window.keys[count - 1])
             };
 
+            // Termination is an invariant, not an accident: every pass
+            // must advance strictly past the last key emitted, because
+            // the pass filter collects only strictly-greater keys. If
+            // a pass ever fails to advance, looping on it would hang
+            // the node — a liveness failure no assertion can catch —
+            // so it surfaces as a fault instead. The mutation log
+            // records the non-strict-comparison mutant hanging the
+            // suite before this guard existed.
+            if let Some(last) = last_emitted {
+                if final_key <= last {
+                    return Err(backend_fault("ordered scan made no progress"));
+                }
+            }
+
             for (k, v) in &batch {
                 if !visit(k, v) {
                     return Ok(());

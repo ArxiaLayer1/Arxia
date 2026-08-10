@@ -8,6 +8,7 @@
 //! duplicate resolution the log forces, and the erase accounting the
 //! hardware bench will compare against.
 
+use arxia_core::{ArxiaError, StorageFault};
 use arxia_storage::conformance;
 use arxia_storage::StorageBackend;
 use arxia_storage_flash::{FlashStorage, SCAN_WINDOW};
@@ -241,5 +242,118 @@ fn erases_are_observable_and_grow_with_write_volume() {
     assert!(
         erases > 0,
         "a wrapping log must have erased pages; counter read {erases}"
+    );
+}
+// --------------------------------------------- the reserved namespace
+
+/// A key in the reserved namespace is refused with a typed fault —
+/// never accepted and then lost.
+///
+/// The probe that motivated this: before the guard existed, a put of a
+/// key beginning with 0x00 was accepted, hidden from every read, and
+/// silently discarded by the next mount as uncommitted journal debris.
+/// An accepted write that evaporates is the worst outcome a store can
+/// produce, so the write must be refused up front, typed, on every
+/// write path — and the data that was legitimately stored must survive
+/// a remount untouched.
+#[test]
+fn a_reserved_key_is_refused_typed_and_nothing_is_lost() {
+    let flash = Flash::new(WriteCountCheck::Twice, None, true);
+    let mut s = FlashStorage::<Flash>::mount(flash, RANGE).expect("mount");
+    s.put(b"u:real", b"kept").unwrap();
+
+    let refused = |r: Result<(), ArxiaError>| {
+        matches!(
+            r,
+            Err(ArxiaError::Storage {
+                fault: StorageFault::ReservedKey
+            })
+        )
+    };
+    assert!(
+        refused(s.put(b"\x00evil", b"data")),
+        "put must refuse, typed"
+    );
+    assert!(
+        refused(s.apply_batch(&[arxia_storage::BatchOp::Put {
+            key: b"\x00evil",
+            value: b"data",
+        }])),
+        "the batch path must refuse too"
+    );
+    assert!(
+        refused(s.apply_batch(&[arxia_storage::BatchOp::Delete { key: b"\x00evil" }])),
+        "a batched delete of a reserved key is refused as well"
+    );
+    assert!(
+        s.get(b"\x00evil").is_err(),
+        "reads do not reach the namespace"
+    );
+
+    // The remount that used to destroy the evidence: the legitimate
+    // key survives, and nothing under 0x00 ever existed.
+    let s2 = FlashStorage::<Flash>::mount(s.into_flash(), RANGE).expect("remount");
+    assert_eq!(
+        s2.get(b"u:real").unwrap().as_deref(),
+        Some(b"kept".as_slice())
+    );
+}
+
+// ------------------------------------------------------ reentrant reads
+
+/// The visit callback may read the store it is scanning.
+///
+/// The struct documents that no internal borrow is held across a call
+/// into user code; before the fix, this test panicked on a RefCell
+/// already borrowed. A node iterating an account chain and resolving
+/// each block's source on the spot is exactly this shape.
+#[test]
+fn a_scan_callback_may_read_the_store_it_scans() {
+    let mut s = fresh();
+    s.put(b"k:1", b"one").unwrap();
+    s.put(b"k:2", b"two").unwrap();
+    s.put(b"k:3", b"three").unwrap();
+
+    let mut checked = 0;
+    s.scan_prefix(b"k:", &mut |k, v| {
+        // A reentrant point lookup from inside the visitor.
+        assert_eq!(
+            s.get(k).unwrap().as_deref(),
+            Some(v),
+            "the reentrant read must agree with the scan"
+        );
+        assert!(s.contains(k).unwrap());
+        checked += 1;
+        true
+    })
+    .unwrap();
+    assert_eq!(checked, 3, "every entry was visited and cross-checked");
+}
+/// The degenerate window, exercised rather than assumed safe.
+///
+/// At `W = 1` every key needs its own pass, so pass-stitching runs
+/// under maximum pressure: any off-by-one in the strictly-greater
+/// resume comparison duplicates or drops a key immediately. Mutating
+/// `SCAN_WINDOW` to 1 is expected to *survive* the mutation suite -
+/// the setting is slow, not wrong - which is exactly why the size is a
+/// const generic: correctness must not depend on it, and this test is
+/// where that claim is exercised.
+#[test]
+fn a_window_of_one_still_scans_correctly() {
+    let flash = Flash::new(WriteCountCheck::Twice, None, true);
+    let mut s: FlashStorage<Flash, 1> =
+        FlashStorage::<Flash, 1>::mount(flash, RANGE).expect("mount");
+    for i in (0..5).rev() {
+        s.put(&alloc_key(i), &[i as u8]).unwrap();
+    }
+    s.put(b"w:0002", b"rewritten").unwrap(); // a duplicate to resolve
+
+    let got = conformance::collect_prefix(&s, b"w:");
+    let keys: Vec<Vec<u8>> = got.iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(keys, (0..5).map(alloc_key).collect::<Vec<_>>());
+    assert_eq!(
+        got[2].1,
+        b"rewritten".to_vec(),
+        "last occurrence wins at W=1 too"
     );
 }
