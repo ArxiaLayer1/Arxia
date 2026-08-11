@@ -19,8 +19,9 @@ pub mod types;
 
 pub use constants::*;
 pub use error::{
-    ArxiaError, BlockField, CapacityKind, DidFault, GenesisRule, HexFaultKind, KeyFault,
-    SerializedItem, SignatureFault, StorageFault, TransportFault,
+    ArxiaError, BlockField, CapacityKind, DidFault, DriverFaultKind, FlashFault, GenesisRule,
+    HexFaultKind, KeyFault, RegionFaultKind, SerializationFaultKind, SerializedItem,
+    SignatureFault, StorageFault, TransportFault,
 };
 pub use types::*;
 

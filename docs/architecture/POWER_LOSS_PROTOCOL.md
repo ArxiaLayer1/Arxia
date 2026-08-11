@@ -22,7 +22,14 @@ flash backend what kill-nine is to the redb backend, one layer lower.
   then loops forever applying batches shaped like real transfers
   (two 193-byte blocks under chain keys plus an index entry — the
   same shape as the conformance fixture), each batch tagged with a
-  monotonically increasing sequence number stored inside the values.
+  monotonically increasing sequence number **that the firmware
+  itself embeds inside every value it writes**. The store provides
+  no sequence facility — its commit marker carries only an
+  operation count and is gone once a batch lands — so every
+  sequence number this protocol mentions, including the audit
+  criteria below, is the firmware's own tag, recovered by parsing
+  the values it wrote. A bench built without those tags cannot run
+  this protocol.
 - The erase/write counting adapter stays enabled; its numbers feed
   the endurance model comparison as a side product.
 

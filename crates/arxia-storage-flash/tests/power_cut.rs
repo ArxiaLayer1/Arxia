@@ -31,6 +31,7 @@
 //! buffers are in play — belongs to the T-Beam bench, and no test on a
 //! host can stand in for it.
 
+use arxia_core::{ArxiaError, FlashFault, StorageFault};
 use arxia_storage::conformance::{realistic_key, realistic_value};
 use arxia_storage::{BatchOp, StorageBackend};
 use arxia_storage_flash::FlashStorage;
@@ -581,9 +582,19 @@ fn reads_gate_on_an_unfinished_batch_and_converge() {
     // the ones the inline recovery retry issues.
     let mut store = seeded_store(&fx);
     store.flash().arm_transient(committing, 1_000_000);
+    // The error is the typed BatchCommitted signal, not a generic
+    // fault: the caller must know the batch is past its commit point
+    // and WILL apply, because reading this as a rollback and
+    // resubmitting would double-apply. The trait documents this as
+    // its one carve-out from "on Err, nothing changed".
     assert!(
-        store.apply_batch(&fx.ops()).is_err(),
-        "with the flash refusing every write, the batch cannot finish"
+        matches!(
+            store.apply_batch(&fx.ops()),
+            Err(ArxiaError::Storage {
+                fault: StorageFault::BatchCommitted
+            })
+        ),
+        "a committed batch that cannot finish must say so, typed"
     );
 
     // The batch is committed but unfinished. No read may show the
@@ -725,7 +736,7 @@ fn a_torn_write_at_every_byte_leaves_all_or_nothing() {
 
     let mut applied = 0u64;
     let mut untouched = 0u64;
-    for cut in (0..total_bytes).step_by(3) {
+    for cut in 0..total_bytes {
         let mut store = seeded_store(&fx);
         store.flash().arm_torn(cut as u32);
         let _ = store.apply_batch(&fx.ops()); // may fail; that is the point
@@ -838,4 +849,242 @@ fn a_foreign_reserved_item_never_reaches_a_reader() {
             true
         })
         .expect("scan");
+}
+// ----------------------------------------- journal corruption exit path
+
+/// A corrupt journal entry under a valid marker is a typed error and
+/// a returned flash driver - never a brick loop.
+///
+/// The fourth review's blocking finding: a malformed MARKER had an
+/// exit path (discard), but a malformed ENTRY had none - replay
+/// failed, mount failed, identically, for ever. Same corruption
+/// class, asymmetric treatment. Now the parse failure surfaces as
+/// JournalCorrupted with the entry index, mount hands the flash
+/// driver back with the error, and the caller holds every option.
+/// The system answer is a re-sync - the ledger is a cache of
+/// consensus state - and this fixture walks it to the end: erase the
+/// region, remount, resume.
+#[test]
+fn a_corrupt_journal_entry_is_a_typed_error_and_a_returned_driver() {
+    // Plant a valid marker (count = 1) and a garbage entry at index 0
+    // through the storage library directly, as corruption would.
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    {
+        let config = sequential_storage::map::MapConfig::try_new(RANGE).expect("config");
+        type RawCache = sequential_storage::cache::Cache<
+            sequential_storage::cache::Uncached,
+            sequential_storage::cache::Uncached,
+            sequential_storage::cache::Uncached,
+            RawKey,
+        >;
+        let mut map: sequential_storage::map::MapStorage<RawKey, FaultyFlash, RawCache> =
+            sequential_storage::map::MapStorage::new(
+                flash,
+                config,
+                sequential_storage::cache::Cache::new_uncached(),
+            );
+        let mut buffer = [0u8; 128];
+        // Journal entry 0: a single byte, shorter than any valid
+        // encoding (tag + key length need two).
+        complete(map.store_item(
+            &mut buffer,
+            &RawKey(vec![0x00, 0x6A, 0x00, 0x00]),
+            &[0xFFu8].as_slice(),
+        ))
+        .expect("poll")
+        .expect("plant the corrupt entry");
+        // A valid marker claiming one operation.
+        complete(map.store_item(
+            &mut buffer,
+            &RawKey(vec![0x00, 0x63]),
+            &1u16.to_be_bytes().as_slice(),
+        ))
+        .expect("poll")
+        .expect("plant the marker");
+    }
+
+    // Mount reports the corruption, typed to the entry, and returns
+    // the driver. Deterministically: a second attempt says the same
+    // thing - the caller is in a loop only if it chooses to be.
+    let failure = FlashStorage::<FaultyFlash>::mount(handle.clone(), RANGE)
+        .expect_err("a corrupt committed journal must not mount");
+    assert!(
+        matches!(
+            failure.error,
+            ArxiaError::Storage {
+                fault: StorageFault::Flash {
+                    fault: FlashFault::JournalCorrupted { entry: 0 }
+                }
+            }
+        ),
+        "the error names the corrupt entry, got: {}",
+        failure.error
+    );
+    let failure2 = FlashStorage::<FaultyFlash>::mount(failure.flash, RANGE)
+        .expect_err("the same corruption reports the same way");
+
+    // The re-sync path: erase the region and start over. The flash
+    // came back with the error, so the caller CAN.
+    let mut flash = failure2.flash;
+    complete(NorFlash::erase(&mut flash, RANGE.start, RANGE.end))
+        .expect("poll")
+        .expect("erase the region");
+    let mut store =
+        FlashStorage::<FaultyFlash>::mount(flash, RANGE).expect("an erased region mounts fresh");
+    store
+        .put(b"u:resynced", b"block")
+        .expect("and serves again");
+    assert_eq!(
+        store.get(b"u:resynced").unwrap().as_deref(),
+        Some(b"block".as_slice())
+    );
+}
+
+// ------------------------------------- read availability over debris
+
+/// Markerless journal debris never costs read availability.
+///
+/// A batch that failed BEFORE its commit point left nothing a reader
+/// can see - the debris is invisible by namespace - so gating reads
+/// on it would trade availability for no consistency at all: with
+/// the flash still refusing writes, the cleanup gate would turn
+/// every read into an error on a store whose visible state is
+/// perfectly sound. Reads pass over debris; only the next batch,
+/// whose journal keys would collide with it, cleans first.
+#[test]
+fn reads_stay_available_over_debris_while_the_flash_is_down() {
+    let fx = Fixture::new();
+    let mut store = seeded_store(&fx);
+
+    // Cut two writes into journaling: pre-commit failure, debris on
+    // flash, and the flash is still refusing writes.
+    store.flash().arm_cut(2);
+    assert!(
+        store.apply_batch(&fx.ops()).is_err(),
+        "the cut batch refuses before committing"
+    );
+
+    // No heal. Reads serve the seeded state, whole, right now.
+    assert_eq!(
+        store.get(&fx.keep).unwrap().as_deref(),
+        Some(fx.original.as_slice()),
+        "reads must not pay an availability price for invisible debris"
+    );
+    assert!(store.contains(&fx.doomed).unwrap());
+    assert!(store.get(&fx.added).unwrap().is_none());
+    store
+        .scan_prefix(b"c:", &mut |k, _| {
+            assert!(k.first() != Some(&0x00));
+            true
+        })
+        .expect("scans stay available too");
+
+    // Power returns; the next batch cleans the debris and lands.
+    store.flash().heal();
+    store
+        .apply_batch(&fx.ops())
+        .expect("the next batch cleans the debris and applies");
+    assert!(fx.applied(&store));
+}
+
+// --------------------------------------------- oversized foreign value
+
+/// A foreign value longer than the backend's cap faults the scan,
+/// typed - it is never silently truncated.
+///
+/// Only a foreign write can produce such an item (our own writes are
+/// capped), and before this guard the scan clipped it to
+/// MAX_VALUE_LEN while get() served all of it: the two read paths
+/// the conformance suite promises agree diverged, silently. Now the
+/// scan surfaces the out-of-spec store with CapacityExceeded, and
+/// the point lookup - which needs no window - serves the value whole.
+#[test]
+fn an_oversized_foreign_value_faults_the_scan_instead_of_truncating() {
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    {
+        let config = sequential_storage::map::MapConfig::try_new(RANGE).expect("config");
+        type RawCache = sequential_storage::cache::Cache<
+            sequential_storage::cache::Uncached,
+            sequential_storage::cache::Uncached,
+            sequential_storage::cache::Uncached,
+            RawKey,
+        >;
+        let mut map: sequential_storage::map::MapStorage<RawKey, FaultyFlash, RawCache> =
+            sequential_storage::map::MapStorage::new(
+                flash,
+                config,
+                sequential_storage::cache::Cache::new_uncached(),
+            );
+        let mut buffer = [0u8; 512];
+        let oversized = vec![0xEEu8; 300];
+        complete(map.store_item(
+            &mut buffer,
+            &RawKey(b"u:big".to_vec()),
+            &oversized.as_slice(),
+        ))
+        .expect("poll")
+        .expect("plant the oversized item");
+    }
+
+    let store = FlashStorage::<FaultyFlash>::mount(handle, RANGE).expect("mount");
+
+    // The point lookup needs no window and serves the value whole.
+    assert_eq!(
+        store.get(b"u:big").unwrap().map(|v| v.len()),
+        Some(300),
+        "get serves the whole value"
+    );
+
+    // The scan cannot hold it whole, so it faults, typed - never a
+    // silent 256-byte prefix.
+    let result = store.scan_prefix(b"u:", &mut |_, _| true);
+    assert!(
+        matches!(
+            result,
+            Err(ArxiaError::Storage {
+                fault: StorageFault::CapacityExceeded { got: 300, .. }
+            })
+        ),
+        "the scan surfaces the out-of-spec item, got: {result:?}"
+    );
+}
+
+// ------------------------------------------------- final-pass economy
+
+/// The final partial pass ends the scan without a termination read
+/// of the whole log.
+///
+/// A pass that collected fewer keys than the window holds has proved
+/// there is nothing above it; reading the log once more to find an
+/// empty window would double the cost of every scan on its dominant
+/// path, and the endurance model would be wrong by a whole pass. The
+/// probe: a scan matching nothing costs exactly one full-log read,
+/// and a five-key scan (one partial pass) must cost about the same -
+/// not twice it.
+#[test]
+fn a_final_partial_pass_ends_the_scan_without_a_termination_read() {
+    let mut store =
+        FlashStorage::<FaultyFlash>::mount(FaultyFlash::healthy(), RANGE).expect("mount");
+    for i in 0..5u8 {
+        store.put(&realistic_key(&format!("00{i}")), &[i]).unwrap();
+    }
+
+    let reads_of = |s: &FlashStorage<FaultyFlash>, prefix: &[u8]| {
+        let before = s.flash().inner.borrow().stats_snapshot();
+        s.scan_prefix(prefix, &mut |_, _| true).expect("scan");
+        let after = s.flash().inner.borrow().stats_snapshot();
+        before.compare_to(after).reads
+    };
+
+    // One full-log iteration, no matches, empty window: the floor.
+    let one_iteration = reads_of(&store, b"zzz");
+    // Five keys fit one partial window: one iteration, then stop.
+    let partial_pass = reads_of(&store, b"c:");
+
+    assert!(
+        partial_pass < one_iteration + one_iteration / 2,
+        "a final partial pass must not re-read the log to terminate:          {partial_pass} reads vs {one_iteration} for one iteration"
+    );
 }

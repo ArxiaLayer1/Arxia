@@ -204,7 +204,7 @@ documentation forbids (a `send_index` entry whose block was never
 written is spendable value no chain records). `arxia-storage-flash`
 therefore carries a batch seal on top of per-item safety: every
 operation is journalled under a reserved key namespace, a commit
-marker (carrying the batch sequence and operation count) is written as
+marker (carrying the operation count) is written as
 the single commit point, the operations are applied, and the journal
 and marker are cleared — with mount-time recovery replaying a marked
 journal to completion and discarding an unmarked one. Its cut-point
@@ -223,6 +223,12 @@ last emitted, so a scan of `n_live` matching keys costs
 ```
 ceil(n_live / SCAN_WINDOW) x n_log        item reads   [derived]
 ```
+
+A pass that collects fewer keys than the window holds ends the scan
+without another read of the log, so the formula is exact on the
+dominant path; only when `n_live` is an exact multiple of
+`SCAN_WINDOW` does one extra full-log pass confirm termination
+[derived].
 
 where `n_log` is the **entire log length, dead versions included** —
 every overwrite of a live key grows `n_log` by one until compaction

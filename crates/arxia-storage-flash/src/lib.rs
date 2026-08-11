@@ -135,11 +135,14 @@ use core::future::Future;
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 
-use arxia_core::{ArxiaError, CapacityKind, StorageFault};
+use arxia_core::{
+    ArxiaError, CapacityKind, DriverFaultKind, FlashFault, RegionFaultKind, SerializationFaultKind,
+    StorageFault,
+};
 use arxia_storage::{BatchOp, StorageBackend};
-use embedded_storage_async::nor_flash::MultiwriteNorFlash;
+use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlashError, NorFlashErrorKind};
 use sequential_storage::cache::{Cache, Uncached};
-use sequential_storage::map::{Key, MapConfig, MapStorage, SerializationError};
+use sequential_storage::map::{Key, MapConfig, MapConfigError, MapStorage, SerializationError};
 
 /// Longest key this backend stores. Arxia's longest key today is a
 /// per-account chain key (`c:` + 64 hex chars + `:` + nonce), which
@@ -262,13 +265,60 @@ fn capacity(what: CapacityKind, got: usize, limit: usize) -> ArxiaError {
     }
 }
 
-fn backend_fault<E: core::fmt::Debug>(e: E) -> ArxiaError {
-    use alloc::format;
+fn flash_fault(fault: FlashFault) -> ArxiaError {
     ArxiaError::Storage {
-        fault: StorageFault::Backend {
-            detail: format!("{e:?}"),
-        },
+        fault: StorageFault::Flash { fault },
     }
+}
+
+/// Mirror an engine error into the typed fault surface.
+///
+/// No allocation happens on this path: an embedded target may be
+/// failing precisely because memory or storage is what broke, and the
+/// error report must not depend on either. Every discriminant the
+/// engine can produce has a typed counterpart, so consumers route on
+/// data - the `Backend {{ detail }}` string variant stays with the
+/// std-class backends.
+fn engine_fault<E: NorFlashError>(e: sequential_storage::Error<E>) -> ArxiaError {
+    use sequential_storage::Error as Se;
+    let fault = match e {
+        Se::Storage { value, .. } => FlashFault::Driver {
+            kind: match value.kind() {
+                NorFlashErrorKind::NotAligned => DriverFaultKind::NotAligned,
+                NorFlashErrorKind::OutOfBounds => DriverFaultKind::OutOfBounds,
+                _ => DriverFaultKind::Other,
+            },
+        },
+        Se::FullStorage => FlashFault::FullStorage,
+        Se::Corrupted { .. } => FlashFault::Corrupted,
+        Se::LogicBug { .. } => FlashFault::EngineBug,
+        Se::BufferTooBig => FlashFault::BufferTooBig,
+        Se::BufferTooSmall(needed) => FlashFault::BufferTooSmall { needed },
+        Se::SerializationError(kind) => match kind {
+            SerializationError::BufferTooSmall => FlashFault::Serialization {
+                kind: SerializationFaultKind::BufferTooSmall,
+            },
+            SerializationError::InvalidData => FlashFault::Serialization {
+                kind: SerializationFaultKind::InvalidData,
+            },
+            SerializationError::InvalidFormat => FlashFault::Serialization {
+                kind: SerializationFaultKind::InvalidFormat,
+            },
+            SerializationError::Custom(code) => FlashFault::Serialization {
+                kind: SerializationFaultKind::Custom(code),
+            },
+            // The enum is non-exhaustive upstream: an unknown variant
+            // means the pinned engine changed shape, which the pin
+            // test forces through review before it can land.
+            _ => FlashFault::EngineBug,
+        },
+        Se::ItemTooBig => FlashFault::ItemTooBig,
+        // The engine's error enum is not marked non-exhaustive today;
+        // if a bump adds a variant, the pin test forces this match to
+        // be revisited before the bump lands.
+        _ => FlashFault::EngineBug,
+    };
+    flash_fault(fault)
 }
 
 /// Key prefix reserved for the batch journal. Reads and scans never
@@ -382,9 +432,12 @@ impl<const W: usize> ScanWindow<W> {
     }
 
     fn store_value(&mut self, slot: usize, value: &[u8]) {
-        let n = value.len().min(MAX_VALUE_LEN);
-        self.values[slot][..n].copy_from_slice(&value[..n]);
-        self.value_lens[slot] = n as u16;
+        // The scan rejects oversized values before offering, so this
+        // index cannot overflow; truncating here instead would let
+        // the scan serve a different byte string than get() for the
+        // same key, which the conformance suite forbids.
+        self.values[slot][..value.len()].copy_from_slice(value);
+        self.value_lens[slot] = value.len() as u16;
     }
 
     fn entry(&self, i: usize) -> (&FlashKey, &[u8]) {
@@ -414,14 +467,71 @@ struct Inner<S: MultiwriteNorFlash, const W: usize> {
 /// never held across a call into user code.
 pub struct FlashStorage<S: MultiwriteNorFlash, const W: usize = SCAN_WINDOW> {
     inner: RefCell<Inner<S, W>>,
-    /// True while the journal may hold state a reader must not see: a
-    /// batch failed mid-flight, or its committed replay did not
-    /// finish. Every public operation checks this first and runs
-    /// recovery before touching the store, so no caller can observe a
-    /// half-applied batch. On the clean path the check is one RAM
-    /// read: recovery scans the log only after an actual failure,
-    /// which keeps it out of the per-batch cost model.
-    dirty: core::cell::Cell<bool>,
+    /// What the journal may currently hold, and therefore who must
+    /// clean it. On the clean path both gates cost one RAM read;
+    /// recovery scans the log only after an actual failure, which
+    /// keeps it out of the per-batch cost model.
+    health: core::cell::Cell<Health>,
+}
+
+impl<S: MultiwriteNorFlash, const W: usize> core::fmt::Debug for FlashStorage<S, W> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The driver is deliberately not required to be Debug; the
+        // store's own observable state is its health.
+        f.debug_struct("FlashStorage")
+            .field(
+                "health",
+                match self.health.get() {
+                    Health::Clean => &"clean",
+                    Health::Debris => &"debris",
+                    Health::Pending => &"pending",
+                },
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// The journal's condition, tracked in RAM.
+///
+/// The distinction the two dirty states draw is who is affected.
+/// Markerless debris ([`Health::Debris`]) is invisible to every read
+/// path already, so gating reads on it would cost availability -
+/// reads on a store whose flash is refusing writes would fail for no
+/// consistency gain - and only the next batch, whose journal keys
+/// would collide with the debris, must clean first. A committed but
+/// unfinished batch ([`Health::Pending`]) is the opposite: readers
+/// would see a half-applied batch, so everything runs recovery first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Health {
+    /// No journal state exists.
+    Clean,
+    /// Markerless journal debris may exist: invisible to readers,
+    /// cleaned before the next batch journals.
+    Debris,
+    /// A committed batch is not fully applied: every operation
+    /// converges the store before touching it.
+    Pending,
+}
+
+/// A failed [`FlashStorage::mount`], carrying the flash driver back.
+///
+/// The medium outlives the software that failed on it, and the caller
+/// keeps every option: retry, or erase the region and re-sync the
+/// ledger from peers.
+pub struct MountFailure<S> {
+    /// The flash driver, returned to the caller.
+    pub flash: S,
+    /// Why the mount failed.
+    pub error: ArxiaError,
+}
+
+impl<S> core::fmt::Debug for MountFailure<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The flash driver is deliberately not required to be Debug.
+        f.debug_struct("MountFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
@@ -430,17 +540,45 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// The range must be page-aligned and at least two pages long;
     /// `sequential-storage` validates that and this constructor
     /// surfaces the failure rather than panicking.
-    pub fn mount(flash: S, flash_range: core::ops::Range<u32>) -> Result<Self, ArxiaError> {
-        let config = MapConfig::try_new(flash_range).map_err(backend_fault)?;
+    ///
+    /// On failure the flash driver comes back with the error, exactly
+    /// as [`Self::into_flash`] returns it on success: the medium
+    /// outlives a failed mount, and the caller keeps every option -
+    /// retry after a transient fault, or erase the region and re-sync
+    /// after [`FlashFault::JournalCorrupted`]. A mount that swallowed
+    /// the driver would leave a recoverable device with no path to
+    /// recovery.
+    pub fn mount(flash: S, flash_range: core::ops::Range<u32>) -> Result<Self, MountFailure<S>> {
+        let config = match MapConfig::try_new(flash_range) {
+            Ok(config) => config,
+            Err(e) => {
+                let kind = match e {
+                    MapConfigError::StartRangeNotAtPageBoundary => {
+                        RegionFaultKind::StartNotPageAligned
+                    }
+                    MapConfigError::EndRangeNotAtPageBoundary => RegionFaultKind::EndNotPageAligned,
+                    _ => RegionFaultKind::TooSmall,
+                };
+                return Err(MountFailure {
+                    flash,
+                    error: flash_fault(FlashFault::BadRegion { kind }),
+                });
+            }
+        };
         let store = Self {
             inner: RefCell::new(Inner {
                 map: MapStorage::new(flash, config, Cache::new_uncached()),
                 buffer: [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32],
                 window: ScanWindow::new(),
             }),
-            dirty: core::cell::Cell::new(false),
+            health: core::cell::Cell::new(Health::Clean),
         };
-        store.recover()?;
+        if let Err(error) = store.recover() {
+            return Err(MountFailure {
+                flash: store.into_flash(),
+                error,
+            });
+        }
         Ok(store)
     }
 
@@ -450,14 +588,28 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         core::cell::RefMut::map(self.inner.borrow_mut(), |i| i.map.flash())
     }
 
-    /// Run recovery if a previous failure may have left journal state
-    /// behind. The clean path costs one RAM read and nothing else.
-    fn ensure_clean(&self) -> Result<(), ArxiaError> {
-        if !self.dirty.get() {
+    /// Converge a committed-but-unfinished batch before an operation
+    /// observes the store. Reads pass over markerless debris - it is
+    /// invisible to them and cleaning it here would trade
+    /// availability for nothing.
+    fn ensure_converged(&self) -> Result<(), ArxiaError> {
+        if self.health.get() != Health::Pending {
             return Ok(());
         }
         self.recover()?;
-        self.dirty.set(false);
+        self.health.set(Health::Clean);
+        Ok(())
+    }
+
+    /// Clean the journal completely before a batch writes into it:
+    /// debris would collide with the new batch's journal keys, and a
+    /// pending batch must land before a new marker exists.
+    fn ensure_clean(&self) -> Result<(), ArxiaError> {
+        if self.health.get() == Health::Clean {
+            return Ok(());
+        }
+        self.recover()?;
+        self.health.set(Health::Clean);
         Ok(())
     }
 
@@ -520,7 +672,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         for index in 0..count {
             let jkey = journal_key(index);
             if let Some(entry) = self.fetch_raw(&jkey)? {
-                apply_encoded_op(self, &entry)?;
+                apply_encoded_op(self, &entry, index)?;
                 self.erase(&jkey)?;
             }
         }
@@ -536,9 +688,9 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
             let Inner { map, buffer, .. } = &mut *inner;
             let mut iter_buffer = [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32];
             let mut iter =
-                poll_once(map.fetch_all_items(&mut iter_buffer))?.map_err(backend_fault)?;
+                poll_once(map.fetch_all_items(&mut iter_buffer))?.map_err(engine_fault)?;
             while let Some((key, _)) =
-                poll_once(iter.next::<&[u8]>(buffer))?.map_err(backend_fault)?
+                poll_once(iter.next::<&[u8]>(buffer))?.map_err(engine_fault)?
             {
                 let k = key.as_slice();
                 if k.len() == JOURNAL_KEY_LEN && k[0] == RESERVED_PREFIX && k[1] == JOURNAL_TAG {
@@ -569,7 +721,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// writes refuse the namespace, because only a write there could
     /// lose data.
     fn fetch(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError> {
-        self.ensure_clean()?;
+        self.ensure_converged()?;
         if key.first() == Some(&RESERVED_PREFIX) {
             return Ok(None);
         }
@@ -581,14 +733,14 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// onto the heap to be dropped immediately is waste a 520 KB
     /// device notices.
     fn exists(&self, key: &[u8]) -> Result<bool, ArxiaError> {
-        self.ensure_clean()?;
+        self.ensure_converged()?;
         if key.first() == Some(&RESERVED_PREFIX) {
             return Ok(false);
         }
         let k = FlashKey::new(key)?;
         let mut inner = self.inner.borrow_mut();
         let Inner { map, buffer, .. } = &mut *inner;
-        let found = poll_once(map.fetch_item::<&[u8]>(buffer, &k))?.map_err(backend_fault)?;
+        let found = poll_once(map.fetch_item::<&[u8]>(buffer, &k))?.map_err(engine_fault)?;
         Ok(found.is_some())
     }
 
@@ -596,7 +748,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         let k = FlashKey::new(key)?;
         let mut inner = self.inner.borrow_mut();
         let Inner { map, buffer, .. } = &mut *inner;
-        let found = poll_once(map.fetch_item::<&[u8]>(buffer, &k))?.map_err(backend_fault)?;
+        let found = poll_once(map.fetch_item::<&[u8]>(buffer, &k))?.map_err(engine_fault)?;
         Ok(found.map(|v| v.to_vec()))
     }
 
@@ -623,20 +775,20 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         let k = FlashKey::new(key)?;
         let mut inner = self.inner.borrow_mut();
         let Inner { map, buffer, .. } = &mut *inner;
-        poll_once(map.store_item(buffer, &k, &value))?.map_err(backend_fault)
+        poll_once(map.store_item(buffer, &k, &value))?.map_err(engine_fault)
     }
 
     fn erase(&self, key: &[u8]) -> Result<(), ArxiaError> {
         let k = FlashKey::new(key)?;
         let mut inner = self.inner.borrow_mut();
         let Inner { map, buffer, .. } = &mut *inner;
-        poll_once(map.remove_item(buffer, &k))?.map_err(backend_fault)
+        poll_once(map.remove_item(buffer, &k))?.map_err(engine_fault)
     }
 }
 
 impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
-        self.ensure_clean()?;
+        self.ensure_converged()?;
         self.store(key, value)
     }
 
@@ -662,7 +814,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         prefix: &[u8],
         visit: &mut dyn FnMut(&[u8], &[u8]) -> bool,
     ) -> Result<(), ArxiaError> {
-        self.ensure_clean()?;
+        self.ensure_converged()?;
         let mut last_emitted: Option<FlashKey> = None;
         loop {
             {
@@ -676,15 +828,26 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
 
                 let mut iter_buffer = [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32];
                 let mut iter =
-                    poll_once(map.fetch_all_items(&mut iter_buffer))?.map_err(backend_fault)?;
+                    poll_once(map.fetch_all_items(&mut iter_buffer))?.map_err(engine_fault)?;
                 while let Some((key, value)) =
-                    poll_once(iter.next::<&[u8]>(buffer))?.map_err(backend_fault)?
+                    poll_once(iter.next::<&[u8]>(buffer))?.map_err(engine_fault)?
                 {
                     if key.as_slice().first() == Some(&RESERVED_PREFIX) {
                         continue; // journal bookkeeping is not user data
                     }
                     if !key.as_slice().starts_with(prefix) {
                         continue;
+                    }
+                    // A value the window cannot hold whole is never
+                    // truncated: a scan serving 256 bytes of a
+                    // 300-byte value while get() served all 300 would
+                    // split the two read paths the conformance suite
+                    // promises agree. Only a foreign write can
+                    // produce such an item - our own writes are
+                    // capped - and an out-of-spec store is surfaced,
+                    // not silently reshaped.
+                    if value.len() > MAX_VALUE_LEN {
+                        return Err(capacity(CapacityKind::Value, value.len(), MAX_VALUE_LEN));
                     }
                     // Strictly greater than the last key emitted, so a
                     // pass never re-emits what the previous one did.
@@ -726,7 +889,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
             // suite before this guard existed.
             if let Some(last) = last_emitted {
                 if final_key <= last {
-                    return Err(backend_fault("ordered scan made no progress"));
+                    return Err(flash_fault(FlashFault::ScanStalled));
                 }
             }
 
@@ -734,6 +897,15 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                 if !visit(k, v) {
                     return Ok(());
                 }
+            }
+
+            // A pass that collected fewer keys than the window holds
+            // proved there is nothing left above it: reading the log
+            // once more to find an empty window would double the cost
+            // of every scan on its dominant path, and the endurance
+            // model would be wrong by a whole pass.
+            if batch.len() < W {
+                return Ok(());
             }
             last_emitted = Some(final_key);
         }
@@ -783,7 +955,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         for (index, op) in ops.iter().enumerate() {
             let n = encode_op(op, &mut encoded);
             if let Err(e) = self.store_raw(&journal_key(index as u16), &encoded[..n]) {
-                self.dirty.set(true);
+                self.health.set(Health::Debris);
                 return Err(e);
             }
         }
@@ -795,24 +967,51 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         // infer that from what is still on flash.
         let count = ops.len() as u16;
         if let Err(e) = self.store_raw(&MARKER_KEY, &count.to_be_bytes()) {
-            self.dirty.set(true);
+            self.health.set(Health::Debris);
             return Err(e);
         }
 
         // Steps 3 and 4. A transient fault mid-replay gets one inline
-        // retry, so an `Err` from this method never leaves a committed
-        // batch half applied while the flash is answering: either the
-        // retry finishes the batch and this call reports the success
-        // it is, or the store is marked dirty and every subsequent
+        // retry, so this method never leaves a committed batch half
+        // applied while the flash is answering: either the retry
+        // finishes the batch and this call reports the success it is,
+        // or the store is marked pending and every subsequent
         // operation runs recovery before touching it - a reader can
         // observe the batch before or after, never in between.
+        //
+        // When the retry fails too, the error is the typed
+        // BatchCommitted signal, not the underlying fault: the batch
+        // is past its commit point and WILL apply on the next access,
+        // and a caller that read a generic error as a rollback would
+        // resubmit and double-apply. The one exception is journal
+        // corruption, which no retry will ever fix - that fault
+        // propagates as itself, because "will converge" would be a
+        // lie.
         match self.replay_journal(count) {
             Ok(()) => Ok(()),
-            Err(_transient) => {
-                self.dirty.set(true);
-                self.recover()?;
-                self.dirty.set(false);
-                Ok(())
+            Err(_first) => {
+                self.health.set(Health::Pending);
+                match self.recover() {
+                    Ok(()) => {
+                        self.health.set(Health::Clean);
+                        Ok(())
+                    }
+                    Err(second) => {
+                        if matches!(
+                            second,
+                            ArxiaError::Storage {
+                                fault: StorageFault::Flash {
+                                    fault: FlashFault::JournalCorrupted { .. }
+                                }
+                            }
+                        ) {
+                            return Err(second);
+                        }
+                        Err(ArxiaError::Storage {
+                            fault: StorageFault::BatchCommitted,
+                        })
+                    }
+                }
             }
         }
     }
@@ -842,28 +1041,41 @@ fn encode_op(op: &BatchOp<'_>, out: &mut [u8]) -> usize {
 
 /// Apply a journalled operation to its real key.
 ///
-/// Every error propagates, the delete arm included: the storage
+/// Every flash error propagates, the delete arm included: the storage
 /// library already returns Ok when asked to remove an absent key
 /// (verified in its source at the pinned version), so an error out of
 /// the erase can only be a real fault. An earlier version swallowed
 /// it in the name of "absent is fine" - a protection the library
 /// already provided - and thereby turned any transient fault on a
 /// batched delete into a silently partial batch.
+///
+/// A parse failure is a different animal from a flash error: it is
+/// local, permanent corruption of a committed batch, and no retry
+/// will ever fix it. It surfaces as the typed
+/// [`FlashFault::JournalCorrupted`] carrying the entry index, so the
+/// caller can tell "the flash faulted, try again" from "this store
+/// needs a re-sync" - the ledger is a cache of consensus state, and
+/// rebuilding it from peers is routine; a device retrying the same
+/// corrupt replay for ever is not. The marker-malformed case has had
+/// its exit path since the third review; this gives the entries the
+/// same one instead of the brick loop the fourth review found.
 fn apply_encoded_op<S: MultiwriteNorFlash, const W: usize>(
     store: &FlashStorage<S, W>,
     entry: &[u8],
+    index: u16,
 ) -> Result<(), ArxiaError> {
+    let corrupt = || flash_fault(FlashFault::JournalCorrupted { entry: index });
     if entry.len() < 2 {
-        return Err(backend_fault("journal entry truncated"));
+        return Err(corrupt());
     }
     let key_len = entry[1] as usize;
     if entry.len() < 2 + key_len {
-        return Err(backend_fault("journal entry key truncated"));
+        return Err(corrupt());
     }
     let key = &entry[2..2 + key_len];
     match entry[0] {
         OP_PUT => store.store(key, &entry[2 + key_len..]),
         OP_DELETE => store.erase(key),
-        _ => Err(backend_fault("journal entry has an unknown op tag")),
+        _ => Err(corrupt()),
     }
 }

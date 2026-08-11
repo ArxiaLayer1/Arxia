@@ -198,6 +198,21 @@ pub trait StorageBackend {
     /// There is deliberately no default implementation. A sequential
     /// fallback would compile and pass casual tests while violating the
     /// contract, so every backend is forced to state how it complies.
+    ///
+    /// # The one carve-out from "on `Err`, nothing changed"
+    ///
+    /// A backend whose commit point precedes its application (the
+    /// flash backend's journal seal) can pass the commit and then be
+    /// unable to finish applying - a fault after the point of no
+    /// return. Rolling back would break the commit guarantee;
+    /// pretending nothing happened would invite the caller to
+    /// resubmit and double-apply. Such a backend returns
+    /// [`StorageFault::BatchCommitted`], and ONLY that fault carries
+    /// this meaning: the batch is committed, its application
+    /// completes on the next successful access or mount, and the
+    /// caller must treat it as "will apply", never as a rollback.
+    /// Every other `Err` keeps the byte-for-byte promise above.
+    /// Callers route on the discriminant, not on `is_err()`.
     fn apply_batch(&mut self, ops: &[BatchOp<'_>]) -> Result<(), ArxiaError>;
 }
 

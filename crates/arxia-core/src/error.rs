@@ -506,6 +506,32 @@ pub enum StorageFault {
     #[error("the key lies in the backend's reserved namespace")]
     ReservedKey,
 
+    /// A batch passed its commit point but its application is still
+    /// pending: a fault interrupted the replay and the inline retry
+    /// could not finish it either. The batch WILL apply - recovery
+    /// completes it on the next successful access or mount - so the
+    /// caller must treat this as "committed, converging", never as a
+    /// rollback. Resubmitting the batch, or submitting an alternative
+    /// one, would double-apply. This is the one deliberate exception
+    /// to the trait's on-`Err`-nothing-changed contract, and the
+    /// trait documentation carries the carve-out explicitly.
+    #[error("the batch is committed; its application completes on the next access")]
+    BatchCommitted,
+
+    /// The flash storage engine reported a typed fault.
+    ///
+    /// The embedded backend's counterpart to [`StorageFault::Backend`]:
+    /// every failure mode of the engine (and of the backend's own
+    /// machinery over it) is mirrored as a discriminant, so consumers
+    /// route on data and the error path performs no allocation - an
+    /// embedded target may be failing precisely because memory or the
+    /// storage needed for an error string is what broke.
+    #[error("flash backend fault: {fault}")]
+    Flash {
+        /// The specific fault.
+        fault: FlashFault,
+    },
+
     /// The backing engine reported a fault of its own (I/O error,
     /// internal corruption, transaction failure).
     ///
@@ -514,12 +540,136 @@ pub enum StorageFault {
     /// would discard the only record of what actually went wrong.
     /// Confined to std-class backends (redb on desktop), where an
     /// allocator is trivially available; an embedded backend reports
-    /// through the typed faults, never through this variant.
+    /// through [`StorageFault::Flash`], never through this variant.
     #[error("backend fault: {detail}")]
     Backend {
         /// The engine's own diagnostic, verbatim.
         detail: String,
     },
+}
+
+/// The typed failure surface of the flash backend, for
+/// [`StorageFault::Flash`].
+///
+/// Mirrors the flash engine's error enum (the `sequential-storage`
+/// pattern follows [`TransportFault`]: payloads survive the crate
+/// boundary as data, not prose) plus the two failure modes the
+/// backend adds on top of the engine: a stalled ordered scan and a
+/// corrupt journal entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FlashFault {
+    /// The flash driver itself failed, classified by the embedded
+    /// storage HAL's own error taxonomy.
+    #[error("flash driver fault: {kind}")]
+    Driver {
+        /// The HAL classification of the driver failure.
+        kind: DriverFaultKind,
+    },
+    /// The storage region is full of live data; nothing can be
+    /// reclaimed to fit the write.
+    #[error("the storage region is full")]
+    FullStorage,
+    /// The engine detected likely memory corruption.
+    #[error("the storage engine detected corruption")]
+    Corrupted,
+    /// The engine reported an internal logic bug (its own
+    /// would-have-been panic, surfaced as an error).
+    #[error("the storage engine reported an internal bug")]
+    EngineBug,
+    /// A working buffer handed to the engine was too big.
+    #[error("a working buffer was too big for the engine")]
+    BufferTooBig,
+    /// A working buffer handed to the engine was too small.
+    #[error("a working buffer was too small: {needed} bytes needed")]
+    BufferTooSmall {
+        /// The size the engine says it needs.
+        needed: usize,
+    },
+    /// A key or value failed to (de)serialize inside the engine.
+    #[error("engine serialization fault: {kind}")]
+    Serialization {
+        /// The engine's own classification.
+        kind: SerializationFaultKind,
+    },
+    /// The item can never fit in this flash region, even empty -
+    /// distinct from [`FlashFault::FullStorage`], which is about
+    /// current occupancy.
+    #[error("the item can never fit in the flash region")]
+    ItemTooBig,
+    /// The flash region handed to mount is unusable, classified by
+    /// what is wrong with it.
+    #[error("unusable flash region: {kind}")]
+    BadRegion {
+        /// What is wrong with the region.
+        kind: RegionFaultKind,
+    },
+    /// An ordered-scan pass failed to advance past the last key it
+    /// emitted. Termination is an invariant of the windowed scan;
+    /// looping on a stalled pass would hang the node, so it surfaces
+    /// here instead.
+    #[error("the ordered scan made no progress")]
+    ScanStalled,
+    /// A journal entry under a valid commit marker cannot be parsed.
+    ///
+    /// This is local, unrecoverable corruption: the committed batch
+    /// can never be replayed. The backend refuses to serve state and
+    /// returns the flash driver to the caller at mount. The system
+    /// answer is a re-sync - the local ledger is a cache of consensus
+    /// state, and rebuilding it from peers is routine; a device that
+    /// retries the same corrupt replay for ever is not.
+    #[error("journal entry {entry} is corrupt under a valid commit marker")]
+    JournalCorrupted {
+        /// The index of the corrupt entry within the batch.
+        entry: u16,
+    },
+}
+
+/// What is wrong with a flash region handed to mount, for
+/// [`FlashFault::BadRegion`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RegionFaultKind {
+    /// The region's start is not on a page boundary.
+    #[error("start is not page-aligned")]
+    StartNotPageAligned,
+    /// The region's end is not on a page boundary.
+    #[error("end is not page-aligned")]
+    EndNotPageAligned,
+    /// The region is smaller than the engine's two-page minimum.
+    #[error("smaller than the two-page minimum")]
+    TooSmall,
+}
+
+/// The embedded storage HAL's classification of a driver failure,
+/// for [`FlashFault::Driver`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DriverFaultKind {
+    /// The operation's arguments were not properly aligned.
+    #[error("arguments not aligned")]
+    NotAligned,
+    /// The operation's arguments were out of bounds.
+    #[error("arguments out of bounds")]
+    OutOfBounds,
+    /// A failure specific to the driver implementation.
+    #[error("driver-specific failure")]
+    Other,
+}
+
+/// The flash engine's serialization-failure classification, for
+/// [`FlashFault::Serialization`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SerializationFaultKind {
+    /// The serialization buffer was too small.
+    #[error("buffer too small")]
+    BufferTooSmall,
+    /// The data could not be serialized (e.g. too big to represent).
+    #[error("invalid data")]
+    InvalidData,
+    /// The bytes being deserialized are in an invalid format.
+    #[error("invalid format")]
+    InvalidFormat,
+    /// An implementation-defined code from a custom (de)serializer.
+    #[error("custom serializer code {0}")]
+    Custom(i32),
 }
 
 /// A named 32-byte field of the compact block encoding, for

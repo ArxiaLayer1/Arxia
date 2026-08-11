@@ -302,7 +302,8 @@ surface.
 The version pin (`deny.toml` +
 `crates/arxia-storage-flash/tests/version_pin.rs`), plus the
 `poll_once` guard and its deliberately-pending-future test
-inside `arxia-storage-flash`.
+(`a_pending_future_is_a_typed_fault_never_a_second_poll` in
+`crates/arxia-storage-flash/tests/single_poll.rs`).
 
 ### Regression detection
 
