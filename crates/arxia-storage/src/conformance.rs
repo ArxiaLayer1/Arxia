@@ -430,6 +430,33 @@ pub fn check_a_transfer_sized_batch_applies_atomically<B: StorageBackend>(b: &mu
     assert!(b.contains(&index).unwrap());
 }
 
+/// A key no realistic schema stores must read as absent, never as an
+/// error.
+///
+/// A bounded backend cannot store a 200-byte key; the truthful answer
+/// to "what does it hold?" is still "nothing", exactly as an
+/// unbounded backend answers for a key nobody wrote. A read that
+/// errs on an unstorable key splits the backends' behaviour on the
+/// reads the trait promises are total, and callers start needing
+/// backend-specific error handling on the lookup path.
+pub fn check_unstorable_keys_read_as_absent<B: StorageBackend>(b: &mut B) {
+    let oversized = vec![b'k'; 200];
+    assert_eq!(
+        b.get(&oversized).expect("get is total"),
+        None,
+        "a key that cannot exist reads as absent"
+    );
+    assert!(
+        !b.contains(&oversized).expect("contains is total"),
+        "and is not contained"
+    );
+    assert!(
+        !b.delete(&oversized)
+            .expect("delete of an absent key is total"),
+        "and deleting it deletes nothing"
+    );
+}
+
 /// Every scan/batch check in this module, as `(name, function)` pairs,
 /// so a backend crate can also run the whole suite in one loop if it
 /// prefers that over per-check wrappers. Kept in one place so a check
@@ -499,6 +526,10 @@ pub fn all_checks<B: StorageBackend>() -> Vec<NamedCheck<B>> {
         (
             "a_transfer_sized_batch_applies_atomically",
             check_a_transfer_sized_batch_applies_atomically::<B>,
+        ),
+        (
+            "unstorable_keys_read_as_absent",
+            check_unstorable_keys_read_as_absent::<B>,
         ),
     ]
 }

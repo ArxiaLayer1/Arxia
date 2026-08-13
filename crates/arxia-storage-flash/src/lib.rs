@@ -98,8 +98,11 @@
 //! # Known limits
 //!
 //! - Keys are bounded at [`MAX_KEY_LEN`] and values at
-//!   [`MAX_VALUE_LEN`]; larger ones are rejected with
-//!   [`StorageFault::CapacityExceeded`] rather than truncated.
+//!   [`MAX_VALUE_LEN`]; larger ones are rejected on WRITE with
+//!   [`StorageFault::CapacityExceeded`] rather than truncated, while
+//!   reads stay total: a key that cannot exist in this store -
+//!   over-long or reserved - is truthfully absent, exactly as the
+//!   other backends answer.
 //! - The scan window lives in the store, not on the stack: the ESP32
 //!   main task has an 8 KB budget and a windowed scan must not consume
 //!   a third of it in locals.
@@ -766,7 +769,11 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// lose data.
     fn fetch(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError> {
         self.ensure_converged()?;
-        if key.first() == Some(&RESERVED_PREFIX) {
+        if key.first() == Some(&RESERVED_PREFIX) || key.len() > MAX_KEY_LEN {
+            // Total reads, both ways a key can be unstorable: a key
+            // that cannot exist in this store is truthfully absent,
+            // exactly as the other backends answer. Only writes
+            // refuse.
             return Ok(None);
         }
         self.fetch_raw(key)
@@ -778,7 +785,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// device notices.
     fn exists(&self, key: &[u8]) -> Result<bool, ArxiaError> {
         self.ensure_converged()?;
-        if key.first() == Some(&RESERVED_PREFIX) {
+        if key.first() == Some(&RESERVED_PREFIX) || key.len() > MAX_KEY_LEN {
             return Ok(false);
         }
         let k = FlashKey::new(key)?;

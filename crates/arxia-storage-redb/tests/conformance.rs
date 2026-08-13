@@ -46,6 +46,7 @@ redb_conformance!(
     check_an_empty_batch_is_a_no_op,
     check_a_batch_carries_a_protocol_sized_block,
     check_a_transfer_sized_batch_applies_atomically,
+    check_unstorable_keys_read_as_absent,
 );
 
 /// Same drift guard as the in-memory suite: every check registered in
@@ -54,7 +55,7 @@ redb_conformance!(
 #[test]
 fn every_registered_check_passes() {
     let checks = conformance::all_checks::<RedbStorage>();
-    assert_eq!(checks.len(), 16, "wrapper list above may be stale");
+    assert_eq!(checks.len(), 17, "wrapper list above may be stale");
     for (_name, check) in checks {
         let (_dir, mut store) = fresh();
         check(&mut store);
