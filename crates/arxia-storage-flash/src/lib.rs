@@ -120,6 +120,16 @@
 //!   lands on the first access. Nothing can be served in between -
 //!   that is the fail-safe choice for a ledger, not an optimisation
 //!   target.
+//! - The commit-point write distrusts the driver's error report: a
+//!   marker that reads back valid is a commit, whatever the wire
+//!   claimed, and the caller hears [`StorageFault::BatchCommitted`],
+//!   never a rollback it might act on. The residual window is a
+//!   driver that lies on the write AND fails the read-back in the
+//!   same instant - then the original fault propagates and the
+//!   rollback contract cannot be locally verified. A caller seeing
+//!   faults in bursts should re-check state after the flash heals
+//!   before resubmitting; the power-loss bench's audit does exactly
+//!   that.
 //! - Nothing in the node is wired to this backend yet.
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -263,6 +273,20 @@ fn capacity(what: CapacityKind, got: usize, limit: usize) -> ArxiaError {
     ArxiaError::Storage {
         fault: StorageFault::CapacityExceeded { what, got, limit },
     }
+}
+
+/// Corruption never converges, so it must never be reported as
+/// [`StorageFault::BatchCommitted`] - "will apply on the next
+/// access" would be a lie.
+fn is_journal_corrupted(e: &ArxiaError) -> bool {
+    matches!(
+        e,
+        ArxiaError::Storage {
+            fault: StorageFault::Flash {
+                fault: FlashFault::JournalCorrupted { .. },
+            }
+        }
+    )
 }
 
 fn flash_fault(fault: FlashFault) -> ArxiaError {
@@ -985,8 +1009,55 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         // land. The marker carries the operation count: replay must
         // know how many entries the batch had, because it cannot
         // infer that from what is still on flash.
+        //
+        // The driver's error report is NOT trusted on this one write.
+        // Real NOR parts can program successfully and still report
+        // failure - a status-poll timeout, a bus error during the
+        // acknowledgement, supply droop while the driver reads back
+        // its status - and this is the single write where believing a
+        // false failure is catastrophic: the caller, told nothing
+        // changed, may submit an alternative batch for the same
+        // logical transition; that batch's pre-batch recovery then
+        // finds the marker VALID, replays the first batch, and
+        // journals the second on top - both apply, and the ledger
+        // carries writes the caller was told were rolled back. So the
+        // error path reads the marker back: if it is on flash and
+        // names this batch, the commit happened, whatever the driver
+        // said, and the caller is told the truth of the medium, not
+        // the claim of the wire.
         let count = ops.len() as u16;
         if let Err(e) = self.store_raw(&MARKER_KEY, &count.to_be_bytes()) {
+            match self.fetch_raw(&MARKER_KEY) {
+                Ok(Some(b)) if b == count.to_be_bytes() => {
+                    // Committed despite the report. Try to finish it
+                    // inline, exactly as a replay fault would be
+                    // retried; failing that, the caller hears
+                    // BatchCommitted, never a rollback it might act
+                    // on.
+                    self.health.set(Health::Pending);
+                    match self.recover() {
+                        Ok(()) => {
+                            self.health.set(Health::Clean);
+                            return Ok(());
+                        }
+                        Err(second) => {
+                            if is_journal_corrupted(&second) {
+                                return Err(second);
+                            }
+                            return Err(ArxiaError::Storage {
+                                fault: StorageFault::BatchCommitted,
+                            });
+                        }
+                    }
+                }
+                // Absent, or not this batch's marker: the commit
+                // truly did not happen and the driver's report was
+                // honest. If the read-back itself failed we cannot
+                // know; the original fault propagates and the
+                // known-limits section owns the residual window
+                // (write lied AND read died together).
+                _ => {}
+            }
             self.health.set(Health::Debris);
             return Err(e);
         }
@@ -1017,14 +1088,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                         Ok(())
                     }
                     Err(second) => {
-                        if matches!(
-                            second,
-                            ArxiaError::Storage {
-                                fault: StorageFault::Flash {
-                                    fault: FlashFault::JournalCorrupted { .. },
-                                }
-                            }
-                        ) {
+                        if is_journal_corrupted(&second) {
                             return Err(second);
                         }
                         Err(ArxiaError::Storage {

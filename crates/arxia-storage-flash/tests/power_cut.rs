@@ -70,6 +70,7 @@ const RANGE: core::ops::Range<u32> = 0..(16 * 4096);
 struct FaultyFlash {
     inner: Rc<RefCell<Mock>>,
     skip: Rc<Cell<usize>>,
+    lies: Rc<Cell<usize>>,
     faults: Rc<Cell<usize>>,
 }
 
@@ -97,6 +98,7 @@ impl FaultyFlash {
         Self {
             inner: Rc::new(RefCell::new(Mock::new(WriteCountCheck::Twice, None, true))),
             skip: Rc::new(Cell::new(usize::MAX)),
+            lies: Rc::new(Cell::new(0)),
             faults: Rc::new(Cell::new(0)),
         }
     }
@@ -121,26 +123,54 @@ impl FaultyFlash {
         self.inner.borrow_mut().bytes_until_shutoff = Some(bytes);
     }
 
+    /// A lying driver: after `after` more writes, the next `count`
+    /// writes SUCCEED physically but report failure - the real-NOR
+    /// behaviour of a status-poll timeout, a bus error during the
+    /// acknowledgement, or supply droop while reading back status.
+    /// The fifth review's third blocker lived exactly here, and no
+    /// clean-failure knob can reach it: the fault the software must
+    /// survive is a medium that disagrees with its own driver.
+    fn arm_lying(&self, after: usize, count: usize) {
+        self.skip.set(after);
+        self.lies.set(count);
+    }
+
     /// Power returns / the fault clears.
     fn heal(&self) {
         self.skip.set(usize::MAX);
+        self.lies.set(0);
         self.faults.set(0);
         self.inner.borrow_mut().bytes_until_shutoff = None;
     }
 
-    fn spend(&self) -> Result<(), DeadError> {
+    fn spend(&self) -> Spend {
         let skip = self.skip.get();
         if skip > 0 {
             self.skip.set(skip.saturating_sub(1));
-            return Ok(());
+            return Spend::Pass;
+        }
+        let lies = self.lies.get();
+        if lies > 0 {
+            self.lies.set(lies.saturating_sub(1));
+            return Spend::Lie;
         }
         let faults = self.faults.get();
         if faults > 0 {
             self.faults.set(faults.saturating_sub(1));
-            return Err(DeadError);
+            return Spend::Fail;
         }
-        Ok(())
+        Spend::Pass
     }
+}
+
+/// What the fault knobs decided for one write attempt.
+enum Spend {
+    /// The write proceeds and reports honestly.
+    Pass,
+    /// The write does not touch the medium and reports failure.
+    Fail,
+    /// The write reaches the medium AND reports failure.
+    Lie,
 }
 
 #[derive(Debug)]
@@ -174,13 +204,29 @@ impl NorFlash for FaultyFlash {
     const ERASE_SIZE: usize = <Mock as NorFlash>::ERASE_SIZE;
 
     async fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
-        self.spend()?;
+        match self.spend() {
+            Spend::Fail => return Err(DeadError),
+            Spend::Pass => {}
+            Spend::Lie => {
+                let mut inner = self.inner.borrow_mut();
+                let _ = complete(inner.erase(from, to));
+                return Err(DeadError);
+            }
+        }
         let mut inner = self.inner.borrow_mut();
         complete(inner.erase(from, to))?.map_err(|_| DeadError)
     }
 
     async fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-        self.spend()?;
+        match self.spend() {
+            Spend::Fail => return Err(DeadError),
+            Spend::Pass => {}
+            Spend::Lie => {
+                let mut inner = self.inner.borrow_mut();
+                let _ = complete(inner.write(offset, bytes));
+                return Err(DeadError);
+            }
+        }
         let mut inner = self.inner.borrow_mut();
         complete(inner.write(offset, bytes))?.map_err(|_| DeadError)
     }
@@ -1212,5 +1258,121 @@ fn an_impossible_marker_count_is_corruption_not_a_boot_long_scan() {
         ),
         "typed to the impossible count, got: {}",
         failure.error
+    );
+}
+// ---------------------------------------- the driver that lies (review 5)
+
+/// A marker write that lands physically while the driver reports
+/// failure is a COMMIT, and the caller is told so - never a rollback
+/// it might act on.
+///
+/// The double-application scenario this forbids: told "nothing
+/// changed", the caller submits an alternative batch for the same
+/// logical transition; that batch's pre-batch recovery finds the
+/// lied-about marker valid, replays the first batch, then applies the
+/// second - both land, and the ledger carries writes the caller was
+/// told were rolled back. The read-back on the commit write's error
+/// path is what stands between the wire's claim and the medium's
+/// truth.
+#[test]
+fn a_lying_marker_write_is_a_commit_not_a_rollback() {
+    let fx = Fixture::new();
+    let total = writes_for_a_full_batch(&fx);
+    let committing = smallest_committing_budget(&fx, total);
+
+    // Case 1: the driver lies once, on the marker write, and the
+    // flash is otherwise healthy. The read-back sees the marker, the
+    // inline recovery finishes the batch, and the caller hears the
+    // success it actually got.
+    let mut store = seeded_store(&fx);
+    store.flash().arm_lying(committing - 1, 1);
+    store
+        .apply_batch(&fx.ops())
+        .expect("a lied-about commit on a healthy flash finishes inline");
+    assert!(fx.applied(&store), "and the batch landed in full");
+
+    // Case 2: the driver lies on the marker write and then fails
+    // honestly. The commit happened; nothing can finish it yet; the
+    // caller must hear BatchCommitted - the one signal that says
+    // "do not resubmit".
+    let mut store = seeded_store(&fx);
+    store.flash().arm_lying(committing - 1, 1);
+    store.flash().faults.set(1_000_000);
+    let err = store
+        .apply_batch(&fx.ops())
+        .expect_err("nothing can finish the batch while the flash refuses writes");
+    assert!(
+        matches!(
+            err,
+            ArxiaError::Storage {
+                fault: StorageFault::BatchCommitted
+            }
+        ),
+        "a lied-about commit must say BatchCommitted, got: {err}"
+    );
+    // And it converges once the flash heals, exactly as the signal
+    // promised.
+    store.flash().heal();
+    assert_eq!(
+        store.get(&fx.added).unwrap().as_deref(),
+        Some(fx.new_v.as_slice())
+    );
+    assert!(fx.applied(&store));
+}
+
+/// A lying JOURNAL write is honestly a rollback: no marker exists, the
+/// phantom entry is invisible debris, and an alternative batch applies
+/// alone - the control case proving the read-back distinguishes the
+/// commit write from every other.
+#[test]
+fn a_lying_journal_write_is_still_a_rollback() {
+    let fx = Fixture::new();
+
+    // Lie on the second journal-entry write: it lands physically, the
+    // driver reports failure, no marker is ever written.
+    let mut store = seeded_store(&fx);
+    store.flash().arm_lying(2, 1);
+    let err = store
+        .apply_batch(&fx.ops())
+        .expect_err("a failed journal write refuses the batch");
+    assert!(
+        !matches!(
+            err,
+            ArxiaError::Storage {
+                fault: StorageFault::BatchCommitted
+            }
+        ),
+        "no marker means no commit: the error must NOT claim one"
+    );
+    assert!(fx.untouched(&store), "and the rollback is real");
+
+    // The caller acts on the rollback and submits an alternative
+    // batch: it applies alone; the lied-about first batch never
+    // resurrects.
+    let alt_key = realistic_key("7777");
+    let alt = [BatchOp::Put {
+        key: &alt_key,
+        value: b"alternative",
+    }];
+    store
+        .apply_batch(&alt)
+        .expect("the alternative batch applies");
+    assert!(
+        fx.untouched(&store) || store.get(&fx.added).unwrap().is_none(),
+        "the first batch must not resurrect"
+    );
+    assert_eq!(
+        store.get(&alt_key).unwrap().as_deref(),
+        Some(b"alternative".as_slice())
+    );
+
+    // And a power cycle changes nothing: still no resurrection.
+    let flash = store.into_flash();
+    flash.heal();
+    let store = FlashStorage::<FaultyFlash>::mount(flash, RANGE).expect("remount");
+    assert!(store.get(&fx.added).unwrap().is_none());
+    assert_eq!(
+        store.get(&alt_key).unwrap().as_deref(),
+        Some(b"alternative".as_slice())
     );
 }
