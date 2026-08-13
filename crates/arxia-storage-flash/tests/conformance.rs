@@ -238,7 +238,7 @@ fn erases_are_observable_and_grow_with_write_volume() {
         }
     }
 
-    let after = s.flash().stats_snapshot();
+    let after = s.flash_mut().stats_snapshot();
     let erases = before.compare_to(after).erases;
     assert!(
         erases > 0,

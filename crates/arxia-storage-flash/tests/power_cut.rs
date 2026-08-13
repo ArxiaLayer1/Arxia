@@ -307,36 +307,70 @@ fn seeded_store(fx: &Fixture) -> FlashStorage<FaultyFlash> {
 fn writes_for_a_full_batch(fx: &Fixture) -> usize {
     let mut store = seeded_store(fx);
     const PROBE: usize = 1_000_000;
-    store.flash().skip.set(PROBE);
+    store.flash_mut().skip.set(PROBE);
     store
         .apply_batch(&fx.ops())
         .expect("unfaulted batch applies");
-    let left = store.flash().skip.get();
+    let left = store.flash_mut().skip.get();
     PROBE - left
 }
 
 /// Bytes one full batch writes, for the torn-write sweep.
 fn bytes_for_a_full_batch(fx: &Fixture) -> u64 {
     let mut store = seeded_store(fx);
-    let before = store.flash().inner.borrow().stats_snapshot();
+    let before = store.flash_mut().inner.borrow().stats_snapshot();
     store
         .apply_batch(&fx.ops())
         .expect("unfaulted batch applies");
-    let after = store.flash().inner.borrow().stats_snapshot();
+    let after = store.flash_mut().inner.borrow().stats_snapshot();
     before.compare_to(after).bytes_written
 }
 
 /// Run a batch against a flash that dies after `budget` writes, then
-/// bring the power back and return the remounted store.
-fn cut_power_during_batch(budget: usize, fx: &Fixture) -> FlashStorage<FaultyFlash> {
+/// bring the power back and return apply_batch's verdict together
+/// with the remounted store - so every sweep can hold the CLASS of
+/// the error to the OUTCOME it predicts, not just the outcome.
+fn cut_power_during_batch(
+    budget: usize,
+    fx: &Fixture,
+) -> (Result<(), ArxiaError>, FlashStorage<FaultyFlash>) {
     let mut store = seeded_store(fx);
     // The cut: from here the flash accepts `budget` more writes.
-    store.flash().arm_cut(budget);
-    let _ = store.apply_batch(&fx.ops()); // may fail; that is the point
+    store.flash_mut().arm_cut(budget);
+    let verdict = store.apply_batch(&fx.ops()); // may fail; that is the point
 
     let flash = store.into_flash();
     flash.heal();
-    FlashStorage::<FaultyFlash>::mount(flash, RANGE).expect("a cut batch must not brick the store")
+    let store = FlashStorage::<FaultyFlash>::mount(flash, RANGE)
+        .expect("a cut batch must not brick the store");
+    (verdict, store)
+}
+
+/// The trait's carve-out, held at every fault point: the class of the
+/// value apply_batch returned must PREDICT the state after recovery.
+/// Ok and BatchCommitted mean the batch landed; any other error means
+/// it never happened. A regression where a generic error hides an
+/// applied batch - the double-application class - fails here and
+/// nowhere else: outcome-only sweeps cannot see it.
+fn assert_class_predicts_outcome(
+    verdict: &Result<(), ArxiaError>,
+    store: &FlashStorage<FaultyFlash>,
+    fx: &Fixture,
+    context: &str,
+) {
+    match verdict {
+        Ok(()) => assert!(fx.applied(store), "{context}: Ok must mean applied"),
+        Err(ArxiaError::Storage {
+            fault: StorageFault::BatchCommitted,
+        }) => assert!(
+            fx.applied(store),
+            "{context}: BatchCommitted must converge to applied"
+        ),
+        Err(_) => assert!(
+            fx.untouched(store),
+            "{context}: a non-BatchCommitted error must mean a real rollback"
+        ),
+    }
 }
 
 /// Every cut point across a batch leaves the store in one of the two
@@ -350,11 +384,8 @@ fn every_cut_point_leaves_all_or_nothing() {
     let fx = Fixture::new();
     let total = writes_for_a_full_batch(&fx);
     for budget in 0..=total {
-        let store = cut_power_during_batch(budget, &fx);
-        assert!(
-            fx.applied(&store) || fx.untouched(&store),
-            "budget {budget}/{total}: partial batch after recovery"
-        );
+        let (verdict, store) = cut_power_during_batch(budget, &fx);
+        assert_class_predicts_outcome(&verdict, &store, &fx, &format!("budget {budget}/{total}"));
     }
 }
 
@@ -369,7 +400,7 @@ fn no_journal_key_is_ever_visible_after_a_cut() {
     let fx = Fixture::new();
     let total = writes_for_a_full_batch(&fx);
     for budget in 0..=total {
-        let store = cut_power_during_batch(budget, &fx);
+        let (_, store) = cut_power_during_batch(budget, &fx);
         store
             .scan_prefix(b"", &mut |k, _| {
                 assert!(
@@ -391,7 +422,8 @@ fn no_journal_key_is_ever_visible_after_a_cut() {
 #[test]
 fn a_completed_batch_leaves_no_bookkeeping() {
     let fx = Fixture::new();
-    let store = cut_power_during_batch(usize::MAX, &fx);
+    let (verdict, store) = cut_power_during_batch(usize::MAX, &fx);
+    assert!(verdict.is_ok(), "an unfaulted batch reports its success");
 
     let mut count = 0;
     store
@@ -410,7 +442,7 @@ fn a_completed_batch_leaves_no_bookkeeping() {
 /// phase to redo. The interesting starting point for recovery cuts.
 fn smallest_committing_budget(fx: &Fixture, total: usize) -> usize {
     (0..=total)
-        .find(|&b| fx.applied(&cut_power_during_batch(b, fx)))
+        .find(|&b| fx.applied(&cut_power_during_batch(b, fx).1))
         .expect("some cut point must commit")
 }
 
@@ -430,7 +462,7 @@ fn a_cut_during_recovery_still_lands_the_whole_batch() {
     for recovery_budget in 0..=total {
         // Cut the batch just past its commit point.
         let mut store = seeded_store(&fx);
-        store.flash().arm_cut(committing);
+        store.flash_mut().arm_cut(committing);
         let _ = store.apply_batch(&fx.ops());
 
         // Power returns, but not for long: recovery is cut too. The
@@ -471,7 +503,7 @@ fn a_pending_marker_is_finished_before_a_new_batch_starts() {
 
     // First batch: cut just past its commit point.
     let mut store = seeded_store(&fx);
-    store.flash().arm_cut(committing);
+    store.flash_mut().arm_cut(committing);
     let _ = store.apply_batch(&fx.ops());
 
     // Second batch on the same store while the flash still refuses
@@ -492,7 +524,7 @@ fn a_pending_marker_is_finished_before_a_new_batch_starts() {
     // marker is written — a backend that skips that step lets the new
     // marker bury the old one, and the committed first batch is
     // stranded half applied for ever. Nothing may be lost.
-    store.flash().heal();
+    store.flash_mut().heal();
     store
         .apply_batch(&second)
         .expect("with the flash healthy, the retried batch applies");
@@ -531,9 +563,9 @@ fn journal_debris_is_invisible_before_any_remount() {
     let total = writes_for_a_full_batch(&fx);
     for budget in 0..=total {
         let mut store = seeded_store(&fx);
-        store.flash().arm_cut(budget);
+        store.flash_mut().arm_cut(budget);
         let _ = store.apply_batch(&fx.ops()); // may fail; that is the point
-        store.flash().heal();
+        store.flash_mut().heal();
 
         // No remount. Whatever state the failure left, no reserved
         // key reaches a reader.
@@ -572,16 +604,13 @@ fn a_transient_fault_at_every_position_leaves_all_or_nothing() {
     let mut refused_before_commit = 0usize;
     for position in 0..=total {
         let mut store = seeded_store(&fx);
-        store.flash().arm_transient(position, 1);
+        store.flash_mut().arm_transient(position, 1);
         let result = store.apply_batch(&fx.ops());
-        let fault_fired = store.flash().faults.get() == 0;
+        let fault_fired = store.flash_mut().faults.get() == 0;
 
-        match result {
+        assert_class_predicts_outcome(&result, &store, &fx, &format!("position {position}"));
+        match &result {
             Ok(()) => {
-                assert!(
-                    fx.applied(&store),
-                    "position {position}: Ok must mean the whole batch landed"
-                );
                 if fault_fired {
                     // The fault hit the replay phase and the inline
                     // retry finished the batch: an Err here would have
@@ -590,12 +619,6 @@ fn a_transient_fault_at_every_position_leaves_all_or_nothing() {
                 }
             }
             Err(_) => {
-                // A fault before the commit point refuses the batch;
-                // reads then serve the seeded state, whole.
-                assert!(
-                    fx.untouched(&store),
-                    "position {position}: Err must mean the batch never happened"
-                );
                 refused_before_commit += 1;
             }
         }
@@ -627,7 +650,7 @@ fn reads_gate_on_an_unfinished_batch_and_converge() {
     // The marker lands, then every further write faults - including
     // the ones the inline recovery retry issues.
     let mut store = seeded_store(&fx);
-    store.flash().arm_transient(committing, 1_000_000);
+    store.flash_mut().arm_transient(committing, 1_000_000);
     // The error is the typed BatchCommitted signal, not a generic
     // fault: the caller must know the batch is past its commit point
     // and WILL apply, because reading this as a rollback and
@@ -656,7 +679,7 @@ fn reads_gate_on_an_unfinished_batch_and_converge() {
     );
 
     // The fault clears; the first access finishes the batch.
-    store.flash().heal();
+    store.flash_mut().heal();
     assert_eq!(
         store.get(&fx.added).unwrap().as_deref(),
         Some(fx.new_v.as_slice()),
@@ -784,19 +807,18 @@ fn a_torn_write_at_every_byte_leaves_all_or_nothing() {
     let mut untouched = 0u64;
     for cut in 0..total_bytes {
         let mut store = seeded_store(&fx);
-        store.flash().arm_torn(cut as u32);
-        let _ = store.apply_batch(&fx.ops()); // may fail; that is the point
+        store.flash_mut().arm_torn(cut as u32);
+        let verdict = store.apply_batch(&fx.ops()); // may fail; that is the point
 
         let flash = store.into_flash();
         flash.heal();
         let store = FlashStorage::<FaultyFlash>::mount(flash, RANGE)
             .expect("a torn write must not brick the store");
+        assert_class_predicts_outcome(&verdict, &store, &fx, &format!("torn at byte {cut}"));
         if fx.applied(&store) {
             applied += 1;
-        } else if fx.untouched(&store) {
-            untouched += 1;
         } else {
-            panic!("byte {cut}: torn write left a partial batch");
+            untouched += 1;
         }
     }
     assert!(applied > 0, "some tears must land after the commit point");
@@ -987,7 +1009,7 @@ fn reads_stay_available_over_debris_while_the_flash_is_down() {
 
     // Cut two writes into journaling: pre-commit failure, debris on
     // flash, and the flash is still refusing writes.
-    store.flash().arm_cut(2);
+    store.flash_mut().arm_cut(2);
     assert!(
         store.apply_batch(&fx.ops()).is_err(),
         "the cut batch refuses before committing"
@@ -1009,7 +1031,7 @@ fn reads_stay_available_over_debris_while_the_flash_is_down() {
         .expect("scans stay available too");
 
     // Power returns; the next batch cleans the debris and lands.
-    store.flash().heal();
+    store.flash_mut().heal();
     store
         .apply_batch(&fx.ops())
         .expect("the next batch cleans the debris and applies");
@@ -1078,9 +1100,9 @@ fn a_final_partial_pass_ends_the_scan_without_a_termination_read() {
     }
 
     let reads_of = |s: &FlashStorage<FaultyFlash>, prefix: &[u8]| {
-        let before = s.flash().inner.borrow().stats_snapshot();
+        let before = s.flash_mut().inner.borrow().stats_snapshot();
         s.scan_prefix(prefix, &mut |_, _| true).expect("scan");
-        let after = s.flash().inner.borrow().stats_snapshot();
+        let after = s.flash_mut().inner.borrow().stats_snapshot();
         before.compare_to(after).reads
     };
 
@@ -1285,7 +1307,7 @@ fn a_lying_marker_write_is_a_commit_not_a_rollback() {
     // inline recovery finishes the batch, and the caller hears the
     // success it actually got.
     let mut store = seeded_store(&fx);
-    store.flash().arm_lying(committing - 1, 1);
+    store.flash_mut().arm_lying(committing - 1, 1);
     store
         .apply_batch(&fx.ops())
         .expect("a lied-about commit on a healthy flash finishes inline");
@@ -1296,8 +1318,8 @@ fn a_lying_marker_write_is_a_commit_not_a_rollback() {
     // caller must hear BatchCommitted - the one signal that says
     // "do not resubmit".
     let mut store = seeded_store(&fx);
-    store.flash().arm_lying(committing - 1, 1);
-    store.flash().faults.set(1_000_000);
+    store.flash_mut().arm_lying(committing - 1, 1);
+    store.flash_mut().faults.set(1_000_000);
     let err = store
         .apply_batch(&fx.ops())
         .expect_err("nothing can finish the batch while the flash refuses writes");
@@ -1312,7 +1334,7 @@ fn a_lying_marker_write_is_a_commit_not_a_rollback() {
     );
     // And it converges once the flash heals, exactly as the signal
     // promised.
-    store.flash().heal();
+    store.flash_mut().heal();
     assert_eq!(
         store.get(&fx.added).unwrap().as_deref(),
         Some(fx.new_v.as_slice())
@@ -1331,7 +1353,7 @@ fn a_lying_journal_write_is_still_a_rollback() {
     // Lie on the second journal-entry write: it lands physically, the
     // driver reports failure, no marker is ever written.
     let mut store = seeded_store(&fx);
-    store.flash().arm_lying(2, 1);
+    store.flash_mut().arm_lying(2, 1);
     let err = store
         .apply_batch(&fx.ops())
         .expect_err("a failed journal write refuses the batch");

@@ -609,9 +609,16 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         Ok(store)
     }
 
-    /// Read-only access to the underlying flash, for erase accounting
-    /// and bench instrumentation.
-    pub fn flash(&self) -> core::cell::RefMut<'_, S> {
+    /// Exclusive, MUTABLE access to the underlying flash, for erase
+    /// accounting and bench instrumentation.
+    ///
+    /// Two truths the old name and doc hid. The guard is a full write
+    /// handle on the medium, not a read-only view - the storage
+    /// engine only exposes its flash mutably. And it holds the
+    /// store's internal cell: any store method called while the guard
+    /// lives panics on the borrow, so take the guard, read the
+    /// numbers, and drop it before touching the store again.
+    pub fn flash_mut(&self) -> core::cell::RefMut<'_, S> {
         core::cell::RefMut::map(self.inner.borrow_mut(), |i| i.map.flash())
     }
 
