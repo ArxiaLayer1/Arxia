@@ -609,19 +609,39 @@ pub enum FlashFault {
     /// here instead.
     #[error("the ordered scan made no progress")]
     ScanStalled,
-    /// A journal entry under a valid commit marker cannot be parsed.
+    /// The journal under a valid commit marker is corrupt - a
+    /// journal entry that fails the write-path invariants, or a
+    /// marker whose operation count exceeds what the region could
+    /// physically hold.
     ///
     /// This is local, unrecoverable corruption: the committed batch
-    /// can never be replayed. The backend refuses to serve state and
-    /// returns the flash driver to the caller at mount. The system
-    /// answer is a re-sync - the local ledger is a cache of consensus
-    /// state, and rebuilding it from peers is routine; a device that
-    /// retries the same corrupt replay for ever is not.
-    #[error("journal entry {entry} is corrupt under a valid commit marker")]
+    /// can never be replayed, and no retry changes that. The backend
+    /// refuses to serve state and returns the flash driver to the
+    /// caller at mount. The system answer is a re-sync - the local
+    /// ledger is a cache of consensus state, and rebuilding it from
+    /// peers is routine; a device that retries the same corrupt
+    /// replay for ever is not.
+    #[error("journal corrupt under a valid commit marker: {part}")]
     JournalCorrupted {
-        /// The index of the corrupt entry within the batch.
-        entry: u16,
+        /// Which part of the journal is corrupt.
+        part: JournalPart,
     },
+}
+
+/// Which part of a committed journal is corrupt, for
+/// [`FlashFault::JournalCorrupted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum JournalPart {
+    /// The journal entry at this index fails the write-path
+    /// invariants (structure, op tag, key namespace, key or value
+    /// bounds).
+    #[error("entry {0}")]
+    Entry(u16),
+    /// The marker's operation count exceeds what the flash region
+    /// could physically hold - the erased-flash pattern 0xFFFF being
+    /// the most likely garbage.
+    #[error("marker count {0}")]
+    MarkerCount(u16),
 }
 
 /// What is wrong with a flash region handed to mount, for

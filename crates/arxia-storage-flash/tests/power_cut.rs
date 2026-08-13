@@ -31,7 +31,7 @@
 //! buffers are in play — belongs to the T-Beam bench, and no test on a
 //! host can stand in for it.
 
-use arxia_core::{ArxiaError, FlashFault, StorageFault};
+use arxia_core::{ArxiaError, FlashFault, JournalPart, StorageFault};
 use arxia_storage::conformance::{realistic_key, realistic_value};
 use arxia_storage::{BatchOp, StorageBackend};
 use arxia_storage_flash::FlashStorage;
@@ -790,6 +790,31 @@ impl sequential_storage::map::Key for RawKey {
     }
 }
 
+/// Plant raw items on a flash through the storage library directly,
+/// bypassing every backend write guard - as corruption, torn-write
+/// garbage or a foreign writer would.
+fn plant(flash: FaultyFlash, items: &[(&[u8], &[u8])]) {
+    let config = sequential_storage::map::MapConfig::try_new(RANGE).expect("config");
+    type RawCache = sequential_storage::cache::Cache<
+        sequential_storage::cache::Uncached,
+        sequential_storage::cache::Uncached,
+        sequential_storage::cache::Uncached,
+        RawKey,
+    >;
+    let mut map: sequential_storage::map::MapStorage<RawKey, FaultyFlash, RawCache> =
+        sequential_storage::map::MapStorage::new(
+            flash,
+            config,
+            sequential_storage::cache::Cache::new_uncached(),
+        );
+    let mut buffer = [0u8; 512];
+    for (key, value) in items {
+        complete(map.store_item(&mut buffer, &RawKey(key.to_vec()), value))
+            .expect("poll")
+            .expect("plant item");
+    }
+}
+
 /// A foreign item in the reserved namespace never reaches a reader,
 /// even though recovery does not recognise it.
 ///
@@ -807,29 +832,7 @@ fn a_foreign_reserved_item_never_reaches_a_reader() {
     // a newer format would.
     let flash = FaultyFlash::healthy();
     let handle = flash.clone();
-    {
-        let config = sequential_storage::map::MapConfig::try_new(RANGE).expect("config");
-        type RawCache = sequential_storage::cache::Cache<
-            sequential_storage::cache::Uncached,
-            sequential_storage::cache::Uncached,
-            sequential_storage::cache::Uncached,
-            RawKey,
-        >;
-        let mut map: sequential_storage::map::MapStorage<RawKey, FaultyFlash, RawCache> =
-            sequential_storage::map::MapStorage::new(
-                flash,
-                config,
-                sequential_storage::cache::Cache::new_uncached(),
-            );
-        let mut buffer = [0u8; 128];
-        complete(map.store_item(
-            &mut buffer,
-            &RawKey(b"\x00foreign".to_vec()),
-            &b"gunk".as_slice(),
-        ))
-        .expect("poll")
-        .expect("plant the foreign item");
-    }
+    plant(flash, &[(b"\x00foreign", b"gunk")]);
 
     let mut store =
         FlashStorage::<FaultyFlash>::mount(handle, RANGE).expect("mount over the foreign item");
@@ -870,39 +873,16 @@ fn a_corrupt_journal_entry_is_a_typed_error_and_a_returned_driver() {
     // through the storage library directly, as corruption would.
     let flash = FaultyFlash::healthy();
     let handle = flash.clone();
-    {
-        let config = sequential_storage::map::MapConfig::try_new(RANGE).expect("config");
-        type RawCache = sequential_storage::cache::Cache<
-            sequential_storage::cache::Uncached,
-            sequential_storage::cache::Uncached,
-            sequential_storage::cache::Uncached,
-            RawKey,
-        >;
-        let mut map: sequential_storage::map::MapStorage<RawKey, FaultyFlash, RawCache> =
-            sequential_storage::map::MapStorage::new(
-                flash,
-                config,
-                sequential_storage::cache::Cache::new_uncached(),
-            );
-        let mut buffer = [0u8; 128];
-        // Journal entry 0: a single byte, shorter than any valid
-        // encoding (tag + key length need two).
-        complete(map.store_item(
-            &mut buffer,
-            &RawKey(vec![0x00, 0x6A, 0x00, 0x00]),
-            &[0xFFu8].as_slice(),
-        ))
-        .expect("poll")
-        .expect("plant the corrupt entry");
-        // A valid marker claiming one operation.
-        complete(map.store_item(
-            &mut buffer,
-            &RawKey(vec![0x00, 0x63]),
-            &1u16.to_be_bytes().as_slice(),
-        ))
-        .expect("poll")
-        .expect("plant the marker");
-    }
+    // Journal entry 0: a single byte, shorter than any valid encoding
+    // (tag + key length need two). Then a valid marker claiming one
+    // operation.
+    plant(
+        flash,
+        &[
+            (&[0x00, 0x6A, 0x00, 0x00], &[0xFFu8]),
+            (&[0x00, 0x63], &1u16.to_be_bytes()),
+        ],
+    );
 
     // Mount reports the corruption, typed to the entry, and returns
     // the driver. Deterministically: a second attempt says the same
@@ -914,7 +894,9 @@ fn a_corrupt_journal_entry_is_a_typed_error_and_a_returned_driver() {
             failure.error,
             ArxiaError::Storage {
                 fault: StorageFault::Flash {
-                    fault: FlashFault::JournalCorrupted { entry: 0 }
+                    fault: FlashFault::JournalCorrupted {
+                        part: JournalPart::Entry(0)
+                    }
                 }
             }
         ),
@@ -1003,30 +985,8 @@ fn reads_stay_available_over_debris_while_the_flash_is_down() {
 fn an_oversized_foreign_value_faults_the_scan_instead_of_truncating() {
     let flash = FaultyFlash::healthy();
     let handle = flash.clone();
-    {
-        let config = sequential_storage::map::MapConfig::try_new(RANGE).expect("config");
-        type RawCache = sequential_storage::cache::Cache<
-            sequential_storage::cache::Uncached,
-            sequential_storage::cache::Uncached,
-            sequential_storage::cache::Uncached,
-            RawKey,
-        >;
-        let mut map: sequential_storage::map::MapStorage<RawKey, FaultyFlash, RawCache> =
-            sequential_storage::map::MapStorage::new(
-                flash,
-                config,
-                sequential_storage::cache::Cache::new_uncached(),
-            );
-        let mut buffer = [0u8; 512];
-        let oversized = vec![0xEEu8; 300];
-        complete(map.store_item(
-            &mut buffer,
-            &RawKey(b"u:big".to_vec()),
-            &oversized.as_slice(),
-        ))
-        .expect("poll")
-        .expect("plant the oversized item");
-    }
+    let oversized = vec![0xEEu8; 300];
+    plant(flash, &[(b"u:big", &oversized)]);
 
     let store = FlashStorage::<FaultyFlash>::mount(handle, RANGE).expect("mount");
 
@@ -1086,5 +1046,171 @@ fn a_final_partial_pass_ends_the_scan_without_a_termination_read() {
     assert!(
         partial_pass < one_iteration + one_iteration / 2,
         "a final partial pass must not re-read the log to terminate:          {partial_pass} reads vs {one_iteration} for one iteration"
+    );
+}
+// ---------------------------- untrusted journal entries (fifth review)
+
+/// A corrupt entry that parses as a DELETE of a journal key is
+/// corruption, refused - never applied.
+///
+/// The fifth review's first blocker: OP_PUT re-entered the write path
+/// and its guards, but OP_DELETE went straight to the engine. A
+/// CRC-valid corrupt entry parsing as "delete journal entry 1" would
+/// have erased the seal's own bookkeeping mid-replay - the replay
+/// then finds entry 1 absent, treats it as already applied, and
+/// reports Ok with an operation silently dropped: the strict subset
+/// the seal exists to forbid. Aimed at the marker instead, a cut
+/// before the end would strand a committed batch half applied for
+/// ever.
+#[test]
+fn a_forged_delete_of_a_journal_key_is_corruption_not_applied() {
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    // Entry 0: OP_DELETE (0x01), key_len 4, key = journal entry 1's
+    // own key. Entry 1: a valid-looking PUT. Marker: count = 2.
+    let forged = [0x01u8, 4, 0x00, 0x6A, 0x00, 0x01];
+    let mut valid_put = vec![0x00u8, 5];
+    valid_put[0] = 0x00; // OP_PUT tag
+    valid_put.extend_from_slice(b"u:ok!");
+    valid_put.extend_from_slice(b"value");
+    plant(
+        flash,
+        &[
+            (&[0x00, 0x6A, 0x00, 0x00], &forged),
+            (&[0x00, 0x6A, 0x00, 0x01], &valid_put),
+            (&[0x00, 0x63], &2u16.to_be_bytes()),
+        ],
+    );
+
+    let failure = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
+        .expect_err("a forged reserved-key delete must refuse, not apply");
+    assert!(
+        matches!(
+            failure.error,
+            ArxiaError::Storage {
+                fault: StorageFault::Flash {
+                    fault: FlashFault::JournalCorrupted {
+                        part: JournalPart::Entry(0)
+                    }
+                }
+            }
+        ),
+        "typed to the corrupt entry, got: {}",
+        failure.error
+    );
+}
+
+/// A corrupt entry whose clobbered key length yields an oversized
+/// value is corruption - never CapacityExceeded.
+///
+/// The class matters twice over. The documented routing (transient =
+/// retry, corrupted = re-sync) classifies a user error in neither
+/// branch, so every mount fails identically for ever; and the
+/// inline-retry path in apply_batch matches on JournalCorrupted, so a
+/// user-classed error there becomes BatchCommitted - "will apply on
+/// the next access" - for a batch that can never apply.
+#[test]
+fn a_clobbered_key_length_yielding_an_oversized_value_is_corruption() {
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    // A structurally parsable PUT: tag, key_len = 5, then 309 more
+    // bytes - so the "value" is 304 bytes, over MAX_VALUE_LEN. This
+    // is exactly what a key_len byte clobbered LOW does to a
+    // legitimate large entry.
+    let mut forged = vec![0x00u8, 5];
+    forged.extend_from_slice(b"u:big");
+    forged.extend_from_slice(&[0xBBu8; 304]);
+    plant(
+        flash,
+        &[
+            (&[0x00, 0x6A, 0x00, 0x00], &forged),
+            (&[0x00, 0x63], &1u16.to_be_bytes()),
+        ],
+    );
+
+    let failure = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
+        .expect_err("an oversized journalled value must refuse as corruption");
+    assert!(
+        matches!(
+            failure.error,
+            ArxiaError::Storage {
+                fault: StorageFault::Flash {
+                    fault: FlashFault::JournalCorrupted {
+                        part: JournalPart::Entry(0)
+                    }
+                }
+            }
+        ),
+        "corruption class, never CapacityExceeded, got: {}",
+        failure.error
+    );
+}
+
+/// A corrupt entry whose clobbered key length yields a reserved key
+/// is corruption - never ReservedKey.
+#[test]
+fn a_clobbered_key_length_yielding_a_reserved_key_is_corruption() {
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    // Tag, key_len = 3, then a key that begins with 0x00 - the other
+    // shape a clobbered key_len produces (probed in the review).
+    let mut forged = vec![0x00u8, 3];
+    forged.extend_from_slice(&[0x00, 0x41, 0x42]);
+    forged.extend_from_slice(b"payload");
+    plant(
+        flash,
+        &[
+            (&[0x00, 0x6A, 0x00, 0x00], &forged),
+            (&[0x00, 0x63], &1u16.to_be_bytes()),
+        ],
+    );
+
+    let failure = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
+        .expect_err("a reserved journalled key must refuse as corruption");
+    assert!(
+        matches!(
+            failure.error,
+            ArxiaError::Storage {
+                fault: StorageFault::Flash {
+                    fault: FlashFault::JournalCorrupted {
+                        part: JournalPart::Entry(0)
+                    }
+                }
+            }
+        ),
+        "corruption class, never ReservedKey, got: {}",
+        failure.error
+    );
+}
+
+/// A marker count beyond the region's physical capacity is corruption
+/// refused in one read - never sixty-five thousand log searches.
+///
+/// 0xFFFF is the erased-flash pattern: precisely the most likely
+/// garbage. Un-bounded, it drove one full-log search per claimed
+/// entry at every mount - a multi-hour boot indistinguishable from a
+/// hang. No genuine batch can hold more entries than the region
+/// could physically store.
+#[test]
+fn an_impossible_marker_count_is_corruption_not_a_boot_long_scan() {
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    plant(flash, &[(&[0x00, 0x63], &[0xFFu8, 0xFF])]);
+
+    let failure = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
+        .expect_err("an impossible count must refuse as corruption");
+    assert!(
+        matches!(
+            failure.error,
+            ArxiaError::Storage {
+                fault: StorageFault::Flash {
+                    fault: FlashFault::JournalCorrupted {
+                        part: JournalPart::MarkerCount(0xFFFF)
+                    }
+                }
+            }
+        ),
+        "typed to the impossible count, got: {}",
+        failure.error
     );
 }

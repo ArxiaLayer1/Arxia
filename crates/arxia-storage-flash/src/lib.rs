@@ -136,8 +136,8 @@ use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 
 use arxia_core::{
-    ArxiaError, CapacityKind, DriverFaultKind, FlashFault, RegionFaultKind, SerializationFaultKind,
-    StorageFault,
+    ArxiaError, CapacityKind, DriverFaultKind, FlashFault, JournalPart, RegionFaultKind,
+    SerializationFaultKind, StorageFault,
 };
 use arxia_storage::{BatchOp, StorageBackend};
 use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlashError, NorFlashErrorKind};
@@ -629,6 +629,26 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         match self.fetch_raw(&MARKER_KEY)? {
             Some(b) if b.len() == 2 => {
                 let count = u16::from_be_bytes([b[0], b[1]]);
+                // The count is untrusted too. A corrupt count - the
+                // erased-flash pattern 0xFFFF being the most likely
+                // garbage - would otherwise drive one full-log search
+                // per claimed entry: 65535 searches at every mount, a
+                // multi-hour boot indistinguishable from a hang. No
+                // genuine batch can hold more entries than the region
+                // could physically store (each journal item costs at
+                // least eight bytes of flash), so a count beyond that
+                // bound is corruption, typed as such.
+                let region = {
+                    let inner = self.inner.borrow();
+                    let range = inner.map.flash_range();
+                    (range.end - range.start) as usize
+                };
+                let max_entries = (region / 8).min(u16::MAX as usize) as u16;
+                if count > max_entries {
+                    return Err(flash_fault(FlashFault::JournalCorrupted {
+                        part: JournalPart::MarkerCount(count),
+                    }));
+                }
                 self.replay_journal(count)
             }
             Some(_) => {
@@ -1001,7 +1021,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                             second,
                             ArxiaError::Storage {
                                 fault: StorageFault::Flash {
-                                    fault: FlashFault::JournalCorrupted { .. }
+                                    fault: FlashFault::JournalCorrupted { .. },
                                 }
                             }
                         ) {
@@ -1039,32 +1059,43 @@ fn encode_op(op: &BatchOp<'_>, out: &mut [u8]) -> usize {
     }
 }
 
-/// Apply a journalled operation to its real key.
+/// Re-validate a journalled operation against every write-path
+/// invariant, then apply it to its real key.
+///
+/// The parsed entry is UNTRUSTED. The CRC catches torn writes, not
+/// all corruption, and an entry that parses structurally can still
+/// violate every invariant the write path enforces - so the replay
+/// re-checks all of them: known op tag, key outside the reserved
+/// namespace (for BOTH ops - an earlier version guarded OP_PUT
+/// through the write path while OP_DELETE went straight to the
+/// engine, and a corrupt entry parsing as a delete of a journal key
+/// could erase the seal's own bookkeeping mid-replay: a later entry
+/// silently skipped as "already applied", or the marker itself gone
+/// with the batch half done), key within [`MAX_KEY_LEN`], value
+/// within [`MAX_VALUE_LEN`].
+///
+/// Every violation is [`FlashFault::JournalCorrupted`] - never a
+/// user-facing class. A corrupt entry that surfaced as
+/// `CapacityExceeded` or `ReservedKey` would fit neither branch of
+/// the documented routing (transient = retry, corrupted = re-sync),
+/// and worse, the inline-retry path in `apply_batch` would miss it
+/// and report `BatchCommitted` - "will apply on the next access" -
+/// for a batch that can never apply.
 ///
 /// Every flash error propagates, the delete arm included: the storage
 /// library already returns Ok when asked to remove an absent key
 /// (verified in its source at the pinned version), so an error out of
-/// the erase can only be a real fault. An earlier version swallowed
-/// it in the name of "absent is fine" - a protection the library
-/// already provided - and thereby turned any transient fault on a
-/// batched delete into a silently partial batch.
-///
-/// A parse failure is a different animal from a flash error: it is
-/// local, permanent corruption of a committed batch, and no retry
-/// will ever fix it. It surfaces as the typed
-/// [`FlashFault::JournalCorrupted`] carrying the entry index, so the
-/// caller can tell "the flash faulted, try again" from "this store
-/// needs a re-sync" - the ledger is a cache of consensus state, and
-/// rebuilding it from peers is routine; a device retrying the same
-/// corrupt replay for ever is not. The marker-malformed case has had
-/// its exit path since the third review; this gives the entries the
-/// same one instead of the brick loop the fourth review found.
+/// the erase can only be a real fault.
 fn apply_encoded_op<S: MultiwriteNorFlash, const W: usize>(
     store: &FlashStorage<S, W>,
     entry: &[u8],
     index: u16,
 ) -> Result<(), ArxiaError> {
-    let corrupt = || flash_fault(FlashFault::JournalCorrupted { entry: index });
+    let corrupt = || {
+        flash_fault(FlashFault::JournalCorrupted {
+            part: JournalPart::Entry(index),
+        })
+    };
     if entry.len() < 2 {
         return Err(corrupt());
     }
@@ -1073,8 +1104,24 @@ fn apply_encoded_op<S: MultiwriteNorFlash, const W: usize>(
         return Err(corrupt());
     }
     let key = &entry[2..2 + key_len];
+    if key.len() > MAX_KEY_LEN {
+        return Err(corrupt());
+    }
+    if key.first() == Some(&RESERVED_PREFIX) {
+        return Err(corrupt());
+    }
     match entry[0] {
-        OP_PUT => store.store(key, &entry[2 + key_len..]),
+        OP_PUT => {
+            let value = &entry[2 + key_len..];
+            if value.len() > MAX_VALUE_LEN {
+                return Err(corrupt());
+            }
+            // The user-facing checks were just re-run above in the
+            // corruption class, so the write goes through the raw
+            // path: running them again through store() would resurface
+            // a violation as a user error.
+            store.store_raw(key, value)
+        }
         OP_DELETE => store.erase(key),
         _ => Err(corrupt()),
     }
