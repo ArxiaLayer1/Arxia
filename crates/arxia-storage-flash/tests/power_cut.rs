@@ -72,6 +72,8 @@ struct FaultyFlash {
     skip: Rc<Cell<usize>>,
     lies: Rc<Cell<usize>>,
     faults: Rc<Cell<usize>>,
+    read_faults: Rc<Cell<usize>>,
+    read_faults_after_lie: Rc<Cell<usize>>,
 }
 
 /// Complete a mock-flash future on its first poll, without awaiting.
@@ -100,6 +102,8 @@ impl FaultyFlash {
             skip: Rc::new(Cell::new(usize::MAX)),
             lies: Rc::new(Cell::new(0)),
             faults: Rc::new(Cell::new(0)),
+            read_faults: Rc::new(Cell::new(0)),
+            read_faults_after_lie: Rc::new(Cell::new(0)),
         }
     }
 
@@ -135,11 +139,21 @@ impl FaultyFlash {
         self.lies.set(count);
     }
 
+    /// The sixth review's window: the moment the driver lies, READS
+    /// start failing too - the bus fault that corrupted the write
+    /// acknowledgement is still corrupting traffic when the read-back
+    /// arrives. The next `count` reads after the first lie fail.
+    fn arm_dead_reads_after_lie(&self, count: usize) {
+        self.read_faults_after_lie.set(count);
+    }
+
     /// Power returns / the fault clears.
     fn heal(&self) {
         self.skip.set(usize::MAX);
         self.lies.set(0);
         self.faults.set(0);
+        self.read_faults.set(0);
+        self.read_faults_after_lie.set(0);
         self.inner.borrow_mut().bytes_until_shutoff = None;
     }
 
@@ -190,6 +204,11 @@ impl ReadNorFlash for FaultyFlash {
     const READ_SIZE: usize = <Mock as ReadNorFlash>::READ_SIZE;
 
     async fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        let read_faults = self.read_faults.get();
+        if read_faults > 0 {
+            self.read_faults.set(read_faults - 1);
+            return Err(DeadError);
+        }
         let mut inner = self.inner.borrow_mut();
         complete(inner.read(offset, bytes))?.map_err(|_| DeadError)
     }
@@ -222,6 +241,10 @@ impl NorFlash for FaultyFlash {
             Spend::Fail => return Err(DeadError),
             Spend::Pass => {}
             Spend::Lie => {
+                let pending_dead_reads = self.read_faults_after_lie.take();
+                if pending_dead_reads > 0 {
+                    self.read_faults.set(pending_dead_reads);
+                }
                 let mut inner = self.inner.borrow_mut();
                 let _ = complete(inner.write(offset, bytes));
                 return Err(DeadError);
@@ -883,6 +906,41 @@ fn plant(flash: FaultyFlash, items: &[(&[u8], &[u8])]) {
     }
 }
 
+/// Plant raw items on any flash, returning it - for regions the
+/// shared 16-page mock cannot model.
+fn plant_raw<S: MultiwriteNorFlash>(
+    flash: S,
+    range: core::ops::Range<u32>,
+    items: &[(&[u8], &[u8])],
+) -> S {
+    let config = sequential_storage::map::MapConfig::try_new(range).expect("config");
+    type RawCache = sequential_storage::cache::Cache<
+        sequential_storage::cache::Uncached,
+        sequential_storage::cache::Uncached,
+        sequential_storage::cache::Uncached,
+        RawKey,
+    >;
+    let mut map: sequential_storage::map::MapStorage<RawKey, S, RawCache> =
+        sequential_storage::map::MapStorage::new(
+            flash,
+            config,
+            sequential_storage::cache::Cache::new_uncached(),
+        );
+    let mut buffer = [0u8; 512];
+    for (key, value) in items {
+        let raw = RawKey(key.to_vec());
+        let outcome = {
+            let mut fut = pin!(map.store_item(&mut buffer, &raw, value));
+            match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+                Poll::Ready(r) => r,
+                Poll::Pending => panic!("mock flash must complete on one poll"),
+            }
+        };
+        outcome.expect("plant item");
+    }
+    map.destroy().0
+}
+
 /// A foreign item in the reserved namespace never reaches a reader,
 /// even though recovery does not recognise it.
 ///
@@ -1396,5 +1454,179 @@ fn a_lying_journal_write_is_still_a_rollback() {
     assert_eq!(
         store.get(&alt_key).unwrap().as_deref(),
         Some(b"alternative".as_slice())
+    );
+}
+// -------------------------------------- the unknown window (review 6)
+
+/// When the marker write lies AND the read-back dies, the store
+/// treats its own state as unknown - and unknown is never served.
+///
+/// The sixth review's probe: classified as debris, reads kept
+/// serving the pre-batch state over a zombie marker, a put was
+/// accepted on top, and the next batch's recovery replayed the old
+/// batch OVER it - an acknowledged write silently overwritten. As
+/// Pending, every access runs recovery before observing: while the
+/// flash is dead the store faults rather than serve the pre-batch
+/// lie, and the first access after healing settles the question from
+/// the medium - here, the marker landed, so the batch replays before
+/// anything else is observed or written.
+#[test]
+fn an_unreadable_readback_is_unknown_never_served() {
+    let fx = Fixture::new();
+    let total = writes_for_a_full_batch(&fx);
+    let committing = smallest_committing_budget(&fx, total);
+
+    // The marker write lies; from that instant every read dies too.
+    let mut store = seeded_store(&fx);
+    store.flash_mut().arm_lying(committing - 1, 1);
+    store.flash_mut().arm_dead_reads_after_lie(1_000_000);
+    let err = store
+        .apply_batch(&fx.ops())
+        .expect_err("with the read-back dead, the batch cannot report success");
+    assert!(
+        !matches!(
+            err,
+            ArxiaError::Storage {
+                fault: StorageFault::BatchCommitted
+            }
+        ),
+        "unknown must not claim commitment it cannot verify"
+    );
+
+    // While the flash is unreadable, no read serves the pre-batch
+    // state: unknown faults, it does not lie.
+    assert!(
+        store.get(&fx.keep).is_err(),
+        "a read in the unknown window must fault, never serve pre-batch state"
+    );
+    assert!(store.get(&fx.added).is_err());
+
+    // The flash heals. The first access settles the question from
+    // the medium: the marker landed, so the batch replays FIRST -
+    // the re-verification sees the post-batch state, and nothing
+    // written after it can be overwritten by a later replay.
+    store.flash_mut().heal();
+    assert_eq!(
+        store.get(&fx.added).unwrap().as_deref(),
+        Some(fx.new_v.as_slice()),
+        "the first read after healing sees the post-batch state"
+    );
+    assert!(fx.applied(&store));
+
+    // And the probe's original victim: a put after healing lands on
+    // the converged state and stays - no later recovery resurrects
+    // the old batch over it.
+    store
+        .put(&fx.keep, b"written-after")
+        .expect("puts resume after convergence");
+    let alt_key = realistic_key("6666");
+    store
+        .apply_batch(&[BatchOp::Put {
+            key: &alt_key,
+            value: b"next",
+        }])
+        .expect("the next batch runs its recovery and applies");
+    assert_eq!(
+        store.get(&fx.keep).unwrap().as_deref(),
+        Some(b"written-after".as_slice()),
+        "an acknowledged put is never overwritten by a zombie replay"
+    );
+}
+
+/// The count bound holds at every region size.
+///
+/// The physical ceiling divides the region by the true minimum
+/// journal-item footprint; an earlier bound capped at u16::MAX waved
+/// 0xFFFF through on any region of 512 KiB or more - the T-Beam's
+/// 4 MiB part included. On a 1 MiB region, 65535 entries would
+/// physically fit, so only the sentinel rule catches the
+/// erased-flash pattern there: apply_batch never writes a count of
+/// u16::MAX, which keeps 0xFFFF unambiguous garbage at every size.
+#[test]
+fn an_impossible_count_is_corruption_at_every_region_size() {
+    // Small region (64 KiB): a count far below the sentinel but
+    // beyond the physical ceiling is caught by arithmetic.
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    plant(flash, &[(&[0x00, 0x63], &0x2000u16.to_be_bytes())]);
+    let failure = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
+        .expect_err("8192 entries cannot fit a 64 KiB region");
+    assert!(
+        matches!(
+            failure.error,
+            ArxiaError::Storage {
+                fault: StorageFault::Flash {
+                    fault: FlashFault::JournalCorrupted {
+                        part: JournalPart::MarkerCount(0x2000)
+                    }
+                }
+            }
+        ),
+        "physical bound, got: {}",
+        failure.error
+    );
+
+    // Large region (1 MiB): the sentinel alone rejects 0xFFFF.
+    type BigMock = MockFlashBase<256, 1, 4096>;
+    const BIG: core::ops::Range<u32> = 0..(256 * 4096);
+    let big = BigMock::new(WriteCountCheck::Twice, None, true);
+    let big = plant_raw(big, BIG, &[(&[0x00, 0x63], &[0xFFu8, 0xFF])]);
+    let failure = FlashStorage::<BigMock>::mount(big, BIG)
+        .expect_err("the erased-flash pattern is garbage at any size");
+    assert!(
+        matches!(
+            failure.error,
+            ArxiaError::Storage {
+                fault: StorageFault::Flash {
+                    fault: FlashFault::JournalCorrupted {
+                        part: JournalPart::MarkerCount(0xFFFF)
+                    }
+                }
+            }
+        ),
+        "sentinel bound, got: {}",
+        failure.error
+    );
+}
+
+/// A failed batch's debris never pins put() on FullStorage: a caller
+/// that only ever puts has no batch and no remount to clean it, so
+/// put cleans once and retries once.
+#[test]
+fn a_failed_batch_never_pins_put_on_a_full_store() {
+    let filler_value = [0x5Au8; 200];
+    let mut store =
+        FlashStorage::<FaultyFlash>::mount(FaultyFlash::healthy(), RANGE).expect("mount");
+
+    // Fill to genuine FullStorage, then free a sliver: enough for a
+    // couple of journal entries, not for a whole batch.
+    let mut fillers: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let key = format!("f:{:04}", fillers.len()).into_bytes();
+        match store.put(&key, &filler_value) {
+            Ok(()) => fillers.push(key),
+            Err(_) => break,
+        }
+    }
+    for key in fillers.iter().take(3) {
+        assert!(store.delete(key).expect("delete filler"));
+    }
+
+    // The batch journals what fits and dies pre-commit: its debris
+    // now holds the freed space.
+    let fx = Fixture::new();
+    assert!(
+        store.apply_batch(&fx.ops()).is_err(),
+        "no room for the whole journal: the batch refuses before committing"
+    );
+
+    // A put-only caller must not be pinned: put cleans the debris
+    // once and retries - no batch, no remount required.
+    store
+        .put(b"u:after", &filler_value)
+        .expect("put must reclaim debris space and land");
+    assert_eq!(
+        store.get(b"u:after").unwrap().as_deref(),
+        Some(filler_value.as_slice())
     );
 }

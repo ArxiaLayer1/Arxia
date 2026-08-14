@@ -126,13 +126,16 @@
 //! - The commit-point write distrusts the driver's error report: a
 //!   marker that reads back valid is a commit, whatever the wire
 //!   claimed, and the caller hears [`StorageFault::BatchCommitted`],
-//!   never a rollback it might act on. The residual window is a
-//!   driver that lies on the write AND fails the read-back in the
-//!   same instant - then the original fault propagates and the
-//!   rollback contract cannot be locally verified. A caller seeing
-//!   faults in bursts should re-check state after the flash heals
-//!   before resubmitting; the power-loss bench's audit does exactly
-//!   that.
+//!   never a rollback it might act on. When the read-back itself
+//!   fails the store treats its own state as unknown: every
+//!   subsequent access runs recovery before observing anything, so a
+//!   caller that re-checks after the flash heals sees the medium's
+//!   truth - post-batch if the marker landed, pre-batch if it did
+//!   not - and never a pre-batch state that a later recovery
+//!   resurrects the batch over. The error returned in that window is
+//!   the original fault; a caller seeing faults in bursts re-checks
+//!   before resubmitting, which is exactly the power-loss bench's
+//!   audit discipline.
 //! - Nothing in the node is wired to this backend yet.
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -386,6 +389,13 @@ fn journal_key(index: u16) -> [u8; 4] {
 
 /// Journal entry key length, shared by the writer and the discard scan.
 const JOURNAL_KEY_LEN: usize = 4;
+
+/// The smallest flash footprint a journal item can have: the engine's
+/// 8-byte item header (measured in its source at the pinned version),
+/// the serialized journal key (length prefix + [`JOURNAL_KEY_LEN`]),
+/// and the 2-byte minimum of a structurally valid entry. The marker
+/// count's physical ceiling divides the region by this.
+const JOURNAL_ITEM_MIN_BYTES: usize = 8 + 1 + JOURNAL_KEY_LEN + 2;
 
 // ------------------------------------------------------ the scan window
 
@@ -663,22 +673,32 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         match self.fetch_raw(&MARKER_KEY)? {
             Some(b) if b.len() == 2 => {
                 let count = u16::from_be_bytes([b[0], b[1]]);
-                // The count is untrusted too. A corrupt count - the
-                // erased-flash pattern 0xFFFF being the most likely
-                // garbage - would otherwise drive one full-log search
-                // per claimed entry: 65535 searches at every mount, a
-                // multi-hour boot indistinguishable from a hang. No
-                // genuine batch can hold more entries than the region
-                // could physically store (each journal item costs at
-                // least eight bytes of flash), so a count beyond that
-                // bound is corruption, typed as such.
+                // The count is untrusted too. A corrupt count would
+                // otherwise drive one full-log search per claimed
+                // entry at every mount: a multi-hour boot,
+                // indistinguishable from a hang. Two bounds refuse
+                // it. Physically, no batch can hold more entries than
+                // the region could store: a journal item costs at
+                // least JOURNAL_ITEM_MIN_BYTES of flash (the engine's
+                // 8-byte item header, measured in its source, plus
+                // the 5-byte serialized journal key and the 2-byte
+                // minimum entry), so `region / that` is the ceiling -
+                // held in usize, because an earlier version capped it
+                // at u16::MAX and thereby waved 0xFFFF through on any
+                // region of 512 KiB or more, the T-Beam's 4 MiB part
+                // included. And 0xFFFF specifically - the
+                // erased-flash pattern, the most likely garbage - can
+                // never be legitimate at any region size, because
+                // apply_batch refuses batches of u16::MAX operations
+                // for exactly this reason: the sentinel stays
+                // unambiguous.
                 let region = {
                     let inner = self.inner.borrow();
                     let range = inner.map.flash_range();
                     (range.end - range.start) as usize
                 };
-                let max_entries = (region / 8).min(u16::MAX as usize) as u16;
-                if count > max_entries {
+                let max_entries = region / JOURNAL_ITEM_MIN_BYTES;
+                if count == u16::MAX || count as usize > max_entries {
                     return Err(flash_fault(FlashFault::JournalCorrupted {
                         part: JournalPart::MarkerCount(count),
                     }));
@@ -847,7 +867,31 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
 impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W> {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError> {
         self.ensure_converged()?;
-        self.store(key, value)
+        match self.store(key, value) {
+            // Pre-commit debris is cleaned by the next batch or the
+            // next mount - but a caller that only ever puts has
+            // neither, and the debris holds real space: without this
+            // retry, one failed batch could pin every subsequent
+            // put on FullStorage for the life of the process. Clean
+            // once, retry once; a second FullStorage is then a
+            // genuinely full store.
+            Err(e)
+                if self.health.get() == Health::Debris
+                    && matches!(
+                        e,
+                        ArxiaError::Storage {
+                            fault: StorageFault::Flash {
+                                fault: FlashFault::FullStorage,
+                            }
+                        }
+                    ) =>
+            {
+                self.recover()?;
+                self.health.set(Health::Clean);
+                self.store(key, value)
+            }
+            r => r,
+        }
     }
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError> {
@@ -973,11 +1017,17 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         if ops.is_empty() {
             return Ok(());
         }
-        if ops.len() > u16::MAX as usize {
+        // Strictly below u16::MAX: a batch of exactly 65535 operations
+        // would write a marker count equal to the erased-flash pattern,
+        // and recovery deliberately treats that value as corruption at
+        // any region size. Refusing it here keeps the sentinel
+        // unambiguous instead of trading it for a one-in-65536
+        // misclassification.
+        if ops.len() >= u16::MAX as usize {
             return Err(capacity(
                 CapacityKind::BatchOperations,
                 ops.len(),
-                u16::MAX as usize,
+                u16::MAX as usize - 1,
             ));
         }
 
@@ -1066,13 +1116,27 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                 }
                 // Absent, or not this batch's marker: the commit
                 // truly did not happen and the driver's report was
-                // honest. If the read-back itself failed we cannot
-                // know; the original fault propagates and the
-                // known-limits section owns the residual window
-                // (write lied AND read died together).
-                _ => {}
+                // honest - the rollback is real, the leftovers are
+                // debris.
+                Ok(_) => {
+                    self.health.set(Health::Debris);
+                }
+                // The read-back itself failed: UNKNOWN, and unknown
+                // is not rollback. Classified as Debris, reads would
+                // keep serving the pre-batch state over a possibly
+                // committed marker, a put would be accepted on top,
+                // and the next batch's recovery would replay the old
+                // batch OVER it - an acknowledged write silently
+                // overwritten. Pending instead: every subsequent
+                // access runs recovery before observing anything, so
+                // the first operation after the flash heals settles
+                // the question from the medium - marker present, the
+                // batch replays first; absent, the debris clears -
+                // and nothing acknowledged is ever built on sand.
+                Err(_read) => {
+                    self.health.set(Health::Pending);
+                }
             }
-            self.health.set(Health::Debris);
             return Err(e);
         }
 

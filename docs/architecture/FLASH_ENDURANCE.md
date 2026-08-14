@@ -252,9 +252,9 @@ accordingly. The journal and marker items are themselves reclaimed
 by compaction like any other overwritten item.
 
 **Recovery cost.** On the clean path a batch performs no recovery
-reads at all: a RAM flag records that the journal is clean, set at
-mount and after every successful batch [derived - the flag is one
-`Cell<bool>`]. Only after an actual failure does the next operation
+reads at all: a RAM health cell (three states - clean, pre-commit
+debris, committed-pending) records what the journal may hold, set at
+mount and after every successful batch [derived]. Only after an actual failure does the next operation
 scan the log to finish or discard the interrupted batch, which costs
 one full-log read - `n_log` item reads - per recovery attempt
 [derived]. Mount always runs one such scan. The bench should see
