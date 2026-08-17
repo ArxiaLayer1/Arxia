@@ -518,6 +518,17 @@ pub enum StorageFault {
     #[error("the batch is committed; its application completes on the next access")]
     BatchCommitted,
 
+    /// A batch's commit could not be verified: the commit-point write
+    /// reported failure AND the read-back that would settle it failed
+    /// too. The batch may or may not have committed. This is neither
+    /// a rollback nor [`StorageFault::BatchCommitted`], and the
+    /// caller must not act as if it were either: re-check the store
+    /// after the flash heals - the first access converges it from the
+    /// medium - before resubmitting anything. Resubmitting on the
+    /// assumption of rollback would double-apply if the marker landed.
+    #[error("the batch's commit could not be verified; re-check after the flash heals")]
+    CommitUncertain,
+
     /// The flash storage engine reported a typed fault.
     ///
     /// The embedded backend's counterpart to [`StorageFault::Backend`]:

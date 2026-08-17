@@ -251,12 +251,26 @@ section-5 erase predictions for batch-heavy scenarios scale
 accordingly. The journal and marker items are themselves reclaimed
 by compaction like any other overwritten item.
 
-**Recovery cost.** On the clean path a batch performs no recovery
-reads at all: a RAM health cell (three states - clean, pre-commit
-debris, committed-pending) records what the journal may hold, set at
-mount and after every successful batch [derived]. Only after an actual failure does the next operation
-scan the log to finish or discard the interrupted batch, which costs
-one full-log read - `n_log` item reads - per recovery attempt
-[derived]. Mount always runs one such scan. The bench should see
-zero recovery overhead in steady state; a recovery read appearing in
-a steady-state trace is a failure being retried, not bookkeeping.
+**Recovery cost.** On the clean path a batch performs no RECOVERY
+scans: a RAM health cell (three states - clean, pre-commit debris,
+committed-pending) records what the journal may hold, set at mount and
+after every successful batch [derived]. Only after an actual failure
+does the next operation scan the log to finish or discard the
+interrupted batch, which costs one full-log read - `n_log` item reads
+- per recovery attempt [derived]. Mount always runs one such scan.
+
+**Apply cost on the current happy path - what the bench WILL see.**
+The successful batch does not, today, apply from the operations it
+holds in RAM: after the marker lands it re-reads each of its `k`
+journal entries from flash and applies from those, then removes each
+entry - one point lookup plus one `remove_item` per operation, and
+each of those is a log search (`remove_item` in particular walks the
+log; the engine's own documentation flags it as slow). Steady-state
+batch cost is therefore `2k + 1` appends PLUS on the order of `2k`
+log searches [derived from the code as written]. This is not drift and
+must not be attributed to the hardware: it is the current
+implementation, and a follow-up issue replaces it by applying from the
+validated in-RAM slice with the same erase-as-you-go capacity profile,
+which removes the `k` re-reads and leaves the `k` removes. The bench
+compares against THIS paragraph until that issue lands, then against
+the revised figure.

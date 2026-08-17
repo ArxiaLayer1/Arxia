@@ -60,8 +60,10 @@
 //!
 //! 1. every operation of the batch is written under the reserved
 //!    journal prefix, keyed by its index;
-//! 2. a marker naming the operation count is written - this single
-//!    item is the commit point;
+//! 2. a marker naming the operation count (with its complement, so
+//!    a torn marker is malformed by construction rather than a
+//!    plausible small count) is written - this single item is the
+//!    commit point;
 //! 3. each operation is applied to its real key and its journal
 //!    entry erased, in order - safe because the count in the marker
 //!    makes an already-erased entry a no-op, not an early stop;
@@ -203,11 +205,24 @@ pub fn poll_once<F: Future>(future: F) -> Result<F::Output, ArxiaError> {
 // ------------------------------------------------------------- key type
 
 /// A bounded byte-string key, ordered lexicographically.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FlashKey {
     bytes: [u8; MAX_KEY_LEN],
     len: u8,
 }
+
+impl PartialEq for FlashKey {
+    fn eq(&self, other: &Self) -> bool {
+        // On the live bytes only, matching `Ord`. A derived
+        // `PartialEq` would compare the padding too, and while every
+        // constructor today zeroes it, one that did not would break
+        // the scan window's duplicate detection silently: two equal
+        // keys with different padding would be held twice.
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for FlashKey {}
 
 impl FlashKey {
     fn new(key: &[u8]) -> Result<Self, ArxiaError> {
@@ -361,6 +376,35 @@ const OP_PUT: u8 = 0x00;
 const OP_DELETE: u8 = 0x01;
 const MARKER_KEY: [u8; 2] = [RESERVED_PREFIX, MARKER_TAG];
 
+/// The marker payload: the operation count and its bitwise complement.
+///
+/// The engine's CRC catches most torn writes, but a torn marker that
+/// happens to collide the CRC at exactly two bytes would parse as a
+/// small, legitimate-looking count - and recovery would then replay a
+/// STRICT PREFIX of a batch that never committed: partial application,
+/// the one state the seal exists to forbid. The complement makes any
+/// two-byte payload malformed by construction (it must be four bytes)
+/// and any four-byte payload self-checking: a torn write that
+/// collides the CRC must also produce a complement pair, which halves
+/// nothing - it multiplies the collision requirement by 2^16. Zero
+/// runtime cost, no format migration: nothing is deployed.
+fn encode_marker(count: u16) -> [u8; 4] {
+    let c = count.to_be_bytes();
+    let n = (!count).to_be_bytes();
+    [c[0], c[1], n[0], n[1]]
+}
+
+/// A marker payload is valid only at four bytes with a matching
+/// complement; anything else is malformed and discarded.
+fn decode_marker(b: &[u8]) -> Option<u16> {
+    if b.len() != 4 {
+        return None;
+    }
+    let count = u16::from_be_bytes([b[0], b[1]]);
+    let check = u16::from_be_bytes([b[2], b[3]]);
+    (check == !count).then_some(count)
+}
+
 /// Largest journal entry: an operation tag, a key length, the key and
 /// a full-sized value. Deliberately larger than [`MAX_VALUE_LEN`],
 /// which bounds one user payload rather than one journal record.
@@ -389,6 +433,11 @@ fn journal_key(index: u16) -> [u8; 4] {
 
 /// Journal entry key length, shared by the writer and the discard scan.
 const JOURNAL_KEY_LEN: usize = 4;
+
+/// The working buffer every engine call receives: room for the largest
+/// journal record plus a serialized key plus header slack. One name,
+/// so the four sites that size it cannot drift apart.
+const ITEM_BUFFER_LEN: usize = JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32;
 
 /// The smallest flash footprint a journal item can have: the engine's
 /// 8-byte item header (measured in its source at the pinned version),
@@ -493,7 +542,7 @@ struct Inner<S: MultiwriteNorFlash, const W: usize> {
     map: MapStorage<FlashKey, S, FlashCache>,
     /// Item buffer for the library. Sized for the longest key plus the
     /// longest value plus their framing.
-    buffer: [u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32],
+    buffer: [u8; ITEM_BUFFER_LEN],
     window: ScanWindow<W>,
 }
 
@@ -605,7 +654,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         let store = Self {
             inner: RefCell::new(Inner {
                 map: MapStorage::new(flash, config, Cache::new_uncached()),
-                buffer: [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32],
+                buffer: [0u8; ITEM_BUFFER_LEN],
                 window: ScanWindow::new(),
             }),
             health: core::cell::Cell::new(Health::Clean),
@@ -671,8 +720,8 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
     /// recovery re-read garbage for ever.
     fn recover(&self) -> Result<(), ArxiaError> {
         match self.fetch_raw(&MARKER_KEY)? {
-            Some(b) if b.len() == 2 => {
-                let count = u16::from_be_bytes([b[0], b[1]]);
+            Some(b) if decode_marker(&b).is_some() => {
+                let count = decode_marker(&b).expect("guarded above");
                 // The count is untrusted too. A corrupt count would
                 // otherwise drive one full-log search per claimed
                 // entry at every mount: a multi-hour boot,
@@ -760,7 +809,7 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         {
             let mut inner = self.inner.borrow_mut();
             let Inner { map, buffer, .. } = &mut *inner;
-            let mut iter_buffer = [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32];
+            let mut iter_buffer = [0u8; ITEM_BUFFER_LEN];
             let mut iter =
                 poll_once(map.fetch_all_items(&mut iter_buffer))?.map_err(engine_fault)?;
             while let Some((key, _)) =
@@ -928,7 +977,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                 } = &mut *inner;
                 window.clear();
 
-                let mut iter_buffer = [0u8; JOURNAL_ENTRY_MAX + MAX_KEY_LEN + 32];
+                let mut iter_buffer = [0u8; ITEM_BUFFER_LEN];
                 let mut iter =
                     poll_once(map.fetch_all_items(&mut iter_buffer))?.map_err(engine_fault)?;
                 while let Some((key, value)) =
@@ -1090,9 +1139,10 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         // said, and the caller is told the truth of the medium, not
         // the claim of the wire.
         let count = ops.len() as u16;
-        if let Err(e) = self.store_raw(&MARKER_KEY, &count.to_be_bytes()) {
+        let marker = encode_marker(count);
+        if let Err(e) = self.store_raw(&MARKER_KEY, &marker) {
             match self.fetch_raw(&MARKER_KEY) {
-                Ok(Some(b)) if b == count.to_be_bytes() => {
+                Ok(Some(b)) if b == marker => {
                     // Committed despite the report. Try to finish it
                     // inline, exactly as a replay fault would be
                     // retried; failing that, the caller hears
@@ -1133,8 +1183,21 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
                 // the question from the medium - marker present, the
                 // batch replays first; absent, the debris clears -
                 // and nothing acknowledged is ever built on sand.
+                //
+                // Pending protects the STORE; the return class must
+                // protect the CALLER. A generic driver fault here is
+                // contractually a rollback, and a caller acting on it
+                // - resubmitting an alternative batch after the flash
+                // heals - would have the next recovery replay the
+                // first batch and then apply the second: double
+                // application. Rollback-certain and unknown are two
+                // distinguishable causes, so they never share a
+                // class: this arm alone emits CommitUncertain.
                 Err(_read) => {
                     self.health.set(Health::Pending);
+                    return Err(ArxiaError::Storage {
+                        fault: StorageFault::CommitUncertain,
+                    });
                 }
             }
             return Err(e);

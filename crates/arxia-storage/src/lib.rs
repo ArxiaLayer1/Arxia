@@ -206,13 +206,28 @@ pub trait StorageBackend {
     /// unable to finish applying - a fault after the point of no
     /// return. Rolling back would break the commit guarantee;
     /// pretending nothing happened would invite the caller to
-    /// resubmit and double-apply. Such a backend returns
-    /// [`StorageFault::BatchCommitted`], and ONLY that fault carries
-    /// this meaning: the batch is committed, its application
-    /// completes on the next successful access or mount, and the
-    /// caller must treat it as "will apply", never as a rollback.
-    /// Every other `Err` keeps the byte-for-byte promise above.
-    /// Callers route on the discriminant, not on `is_err()`.
+    /// resubmit and double-apply. Such a backend's `Err` therefore
+    /// falls into exactly three classes, and callers route on the
+    /// discriminant, never on `is_err()`:
+    ///
+    /// - **Any other fault** - the batch never happened. The store
+    ///   is byte-for-byte as it was, and the caller may act on that
+    ///   (retry, submit an alternative, give up).
+    /// - [`StorageFault::BatchCommitted`] - the batch is committed
+    ///   and its application completes on the next successful access
+    ///   or mount. The caller must treat it as "will apply", never
+    ///   as a rollback; resubmitting would double-apply.
+    /// - [`StorageFault::CommitUncertain`] - the commit-point write
+    ///   reported failure and the read-back that would settle it
+    ///   failed too: the batch may or may not have committed. The
+    ///   caller must re-check the store after the backend heals -
+    ///   the first access converges it from the medium - and only
+    ///   then decide. Acting on an assumed rollback here is the
+    ///   double-application path; acting on an assumed commit loses
+    ///   the batch if it never landed.
+    ///
+    /// Only backends with a commit point ahead of application ever
+    /// return the last two; the in-memory and redb backends never do.
     fn apply_batch(&mut self, ops: &[BatchOp<'_>]) -> Result<(), ArxiaError>;
 }
 

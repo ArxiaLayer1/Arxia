@@ -389,6 +389,15 @@ fn assert_class_predicts_outcome(
             fx.applied(store),
             "{context}: BatchCommitted must converge to applied"
         ),
+        // The third class: the caller was told to re-check, and after
+        // recovery the store must be in ONE of the two clean states -
+        // never in between - which is exactly what re-checking finds.
+        Err(ArxiaError::Storage {
+            fault: StorageFault::CommitUncertain,
+        }) => assert!(
+            fx.applied(store) || fx.untouched(store),
+            "{context}: CommitUncertain must converge to a clean state"
+        ),
         Err(_) => assert!(
             fx.untouched(store),
             "{context}: a non-BatchCommitted error must mean a real rollback"
@@ -881,6 +890,18 @@ impl sequential_storage::map::Key for RawKey {
     }
 }
 
+/// A well-formed marker payload for `count`: the count and its
+/// complement, exactly as the backend writes it. Fixtures that plant
+/// markers use this so a format change fails them loudly instead of
+/// silently turning a "valid marker" fixture into a "malformed marker"
+/// one.
+#[allow(dead_code)]
+fn marker_for(count: u16) -> [u8; 4] {
+    let c = count.to_be_bytes();
+    let n = (!count).to_be_bytes();
+    [c[0], c[1], n[0], n[1]]
+}
+
 /// Plant raw items on a flash through the storage library directly,
 /// bypassing every backend write guard - as corruption, torn-write
 /// garbage or a foreign writer would.
@@ -1006,7 +1027,7 @@ fn a_corrupt_journal_entry_is_a_typed_error_and_a_returned_driver() {
         flash,
         &[
             (&[0x00, 0x6A, 0x00, 0x00], &[0xFFu8]),
-            (&[0x00, 0x63], &1u16.to_be_bytes()),
+            (&[0x00, 0x63], &[0x00, 0x01, 0xFF, 0xFE]),
         ],
     );
 
@@ -1204,7 +1225,7 @@ fn a_forged_delete_of_a_journal_key_is_corruption_not_applied() {
         &[
             (&[0x00, 0x6A, 0x00, 0x00], &forged),
             (&[0x00, 0x6A, 0x00, 0x01], &valid_put),
-            (&[0x00, 0x63], &2u16.to_be_bytes()),
+            (&[0x00, 0x63], &[0x00, 0x02, 0xFF, 0xFD]),
         ],
     );
 
@@ -1250,7 +1271,7 @@ fn a_clobbered_key_length_yielding_an_oversized_value_is_corruption() {
         flash,
         &[
             (&[0x00, 0x6A, 0x00, 0x00], &forged),
-            (&[0x00, 0x63], &1u16.to_be_bytes()),
+            (&[0x00, 0x63], &[0x00, 0x01, 0xFF, 0xFE]),
         ],
     );
 
@@ -1287,7 +1308,7 @@ fn a_clobbered_key_length_yielding_a_reserved_key_is_corruption() {
         flash,
         &[
             (&[0x00, 0x6A, 0x00, 0x00], &forged),
-            (&[0x00, 0x63], &1u16.to_be_bytes()),
+            (&[0x00, 0x63], &[0x00, 0x01, 0xFF, 0xFE]),
         ],
     );
 
@@ -1321,7 +1342,7 @@ fn a_clobbered_key_length_yielding_a_reserved_key_is_corruption() {
 fn an_impossible_marker_count_is_corruption_not_a_boot_long_scan() {
     let flash = FaultyFlash::healthy();
     let handle = flash.clone();
-    plant(flash, &[(&[0x00, 0x63], &[0xFFu8, 0xFF])]);
+    plant(flash, &[(&[0x00, 0x63], &[0xFFu8, 0xFF, 0x00, 0x00])]);
 
     let failure = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
         .expect_err("an impossible count must refuse as corruption");
@@ -1483,14 +1504,19 @@ fn an_unreadable_readback_is_unknown_never_served() {
     let err = store
         .apply_batch(&fx.ops())
         .expect_err("with the read-back dead, the batch cannot report success");
+    // The class protects the caller: not BatchCommitted (it cannot
+    // verify a commit) and not a generic fault either (a generic
+    // fault is contractually a rollback, and a caller resubmitting on
+    // it would double-apply once the marker turns out to have landed).
+    // CommitUncertain, and only here.
     assert!(
-        !matches!(
+        matches!(
             err,
             ArxiaError::Storage {
-                fault: StorageFault::BatchCommitted
+                fault: StorageFault::CommitUncertain
             }
         ),
-        "unknown must not claim commitment it cannot verify"
+        "the unknown window must say CommitUncertain, got: {err}"
     );
 
     // While the flash is unreadable, no read serves the pre-batch
@@ -1548,7 +1574,7 @@ fn an_impossible_count_is_corruption_at_every_region_size() {
     // beyond the physical ceiling is caught by arithmetic.
     let flash = FaultyFlash::healthy();
     let handle = flash.clone();
-    plant(flash, &[(&[0x00, 0x63], &0x2000u16.to_be_bytes())]);
+    plant(flash, &[(&[0x00, 0x63], &[0x20, 0x00, 0xDF, 0xFF])]);
     let failure = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
         .expect_err("8192 entries cannot fit a 64 KiB region");
     assert!(
@@ -1570,7 +1596,7 @@ fn an_impossible_count_is_corruption_at_every_region_size() {
     type BigMock = MockFlashBase<256, 1, 4096>;
     const BIG: core::ops::Range<u32> = 0..(256 * 4096);
     let big = BigMock::new(WriteCountCheck::Twice, None, true);
-    let big = plant_raw(big, BIG, &[(&[0x00, 0x63], &[0xFFu8, 0xFF])]);
+    let big = plant_raw(big, BIG, &[(&[0x00, 0x63], &[0xFFu8, 0xFF, 0x00, 0x00])]);
     let failure = FlashStorage::<BigMock>::mount(big, BIG)
         .expect_err("the erased-flash pattern is garbage at any size");
     assert!(
@@ -1628,5 +1654,95 @@ fn a_failed_batch_never_pins_put_on_a_full_store() {
     assert_eq!(
         store.get(b"u:after").unwrap().as_deref(),
         Some(filler_value.as_slice())
+    );
+}
+// --------------------------------------- torn marker, CRC-colliding (r7)
+
+/// A two-byte marker payload that passes the engine's CRC is
+/// MALFORMED, discarded together with its journal - never replayed
+/// as a small legitimate count.
+///
+/// The seventh review's second blocker: a torn marker colliding the
+/// CRC at exactly two bytes parsed as a plausible count, passed both
+/// count bounds, and recovery replayed a strict PREFIX of a batch
+/// that never committed - partial application, the one state the
+/// seal forbids. The marker now carries count + !count; two bytes
+/// can never be a marker, and a four-byte tear must also forge the
+/// complement. The fixture plants exactly the old shape - a
+/// CRC-valid two-byte "count = 1" over a journal of two entries -
+/// and holds recovery to discarding it: nothing applied, store
+/// clean, mount successful.
+#[test]
+fn a_two_byte_crc_valid_marker_is_malformed_not_replayed() {
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    let mut put0 = vec![0x00u8, 5];
+    put0.extend_from_slice(b"u:one");
+    put0.extend_from_slice(b"first");
+    let mut put1 = vec![0x00u8, 5];
+    put1.extend_from_slice(b"u:two");
+    put1.extend_from_slice(b"second");
+    plant(
+        flash,
+        &[
+            (&[0x00, 0x6A, 0x00, 0x00], &put0),
+            (&[0x00, 0x6A, 0x00, 0x01], &put1),
+            // The old two-byte shape, count = 1: a torn four-byte
+            // marker that lost its complement, or a stale format. It
+            // passes the engine CRC (the mock computes it honestly on
+            // whatever is stored) and would once have replayed entry
+            // 0 alone.
+            (&[0x00, 0x63], &[0x00, 0x01]),
+        ],
+    );
+
+    let store = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
+        .expect("a malformed marker is discarded, the store mounts");
+    assert!(
+        store.get(b"u:one").unwrap().is_none(),
+        "no strict prefix of an uncommitted batch may apply"
+    );
+    assert!(store.get(b"u:two").unwrap().is_none());
+    // And the debris is gone: a fresh batch journals and lands
+    // without colliding with leftovers.
+    let mut store = store;
+    let fx = Fixture::new();
+    store.put(&fx.keep, &fx.original).unwrap();
+    store.put(&fx.doomed, &fx.original).unwrap();
+    store.apply_batch(&fx.ops()).expect("a fresh batch applies");
+    assert!(fx.applied(&store));
+}
+/// A four-byte marker whose complement does not match is malformed
+/// too - the length check alone is not the protection, the
+/// self-check is.
+///
+/// This is the torn-write shape the complement exists for: a tear
+/// that happens to leave four bytes and pass the CRC still has to
+/// produce a matching complement pair, and this one does not. It is
+/// discarded with its journal; nothing applies. Without this
+/// fixture, a marker decoder that checked the length and ignored the
+/// complement would pass every other test in this file.
+#[test]
+fn a_four_byte_marker_with_a_bad_complement_is_malformed_not_replayed() {
+    let flash = FaultyFlash::healthy();
+    let handle = flash.clone();
+    let mut put0 = vec![0x00u8, 5];
+    put0.extend_from_slice(b"u:one");
+    put0.extend_from_slice(b"first");
+    plant(
+        flash,
+        &[
+            (&[0x00, 0x6A, 0x00, 0x00], &put0),
+            // count = 1, but the complement bytes are garbage - not
+            // !1 = 0xFFFE.
+            (&[0x00, 0x63], &[0x00, 0x01, 0x12, 0x34]),
+        ],
+    );
+
+    let store = FlashStorage::<FaultyFlash>::mount(handle, RANGE)
+        .expect("a marker with a bad complement is discarded, the store mounts");
+    assert!(
+        store.get(b"u:one").unwrap().is_none(),
+        "a marker that fails its self-check must not replay anything"
     );
 }
