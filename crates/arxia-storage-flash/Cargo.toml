@@ -1,0 +1,25 @@
+[package]
+name = "arxia-storage-flash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Flash-backed StorageBackend for Arxia nodes on embedded targets"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../arxia-core", default-features = false }
+arxia-storage = { path = "../arxia-storage", default-features = false }
+sequential-storage = { workspace = true }
+embedded-storage-async = { version = "0.4.1", default-features = false }
+
+[features]
+# std is off by default here, unlike the desktop crates: this backend
+# exists for the bare-metal target, and a std build is only ever the
+# test harness.
+default = []
+std = ["arxia-core/std", "arxia-storage/std", "sequential-storage/std"]
+
+[dev-dependencies]
+arxia-storage = { path = "../arxia-storage", features = ["conformance"] }
+sequential-storage = { workspace = true, features = ["_test", "alloc", "std"] }

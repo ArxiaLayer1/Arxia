@@ -79,6 +79,21 @@ version = "<4.1.0"
 name = "redb"
 version = ">=4.2.0"
 
+# sequential-storage : accepted-risk envelope is exactly the probed
+# 8.0.x line. The in-flash format is declared unstable upstream, the
+# single-poll behaviour and the iteration order are implementation
+# details established by probe ; see docs/dependency-risks.md, the
+# four sequential-storage entries, for the rationale and the
+# revalidation protocol. Any bump comes through deliberate review,
+# not a silent update.
+[[bans.deny]]
+name = "sequential-storage"
+version = "<8.0.1"
+
+[[bans.deny]]
+name = "sequential-storage"
+version = ">=8.1.0"
+
 [sources]
 # Reject unknown registries and unknown git remotes.
 unknown-registry = "deny"

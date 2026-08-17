@@ -178,6 +178,190 @@ version-pin test, this entry, and deny.toml together. The
 kill-nine test itself is the regression net for the recovery
 contract on every future bump.
 
+## sequential-storage unstable in-flash format
+
+### Affected version
+
+`sequential-storage = 8.0.1` (the version this workspace pins),
+used by `arxia-storage-flash` as the on-flash key-value log.
+
+### Behaviour
+
+The upstream README states the in-flash representation is not
+(yet ?) stable, and the crate has shipped eight major versions
+since 2023. A major bump is allowed to change the format of data
+already written to flash : a device upgraded across such a bump
+can find its existing store unreadable — for a node, loss of the
+local ledger replica without any crash having occurred.
+
+### Workaround
+
+None at runtime. The store format a device is flashed with is
+the format it lives with until a deliberate migration exists.
+
+### Why we accept
+
+The crate is the only maintained no_std key-value store over raw
+NOR flash with per-item power-fail safety in the ecosystem ;
+building an equivalent in-house was judged a larger risk than
+pinning one version of a maintained one. RustSec lists no
+advisory for sequential-storage (checked at adoption).
+
+### Mechanical anchor
+
+`deny.toml` pins the envelope to `>=8.0.1, <8.1.0` as the
+conventional record. The enforced anchor is
+`crates/arxia-storage-flash/tests/version_pin.rs`, which reads
+the resolved version out of `Cargo.lock` and fails the suite on
+any drift off 8.0.x — nothing in CI runs cargo-deny today, so
+the test is what actually stops a silent bump.
+
+### Regression detection
+
+Any bump is validated, not adopted : mount a store written by
+the pinned version under the candidate version and read every
+key back, before anything else. A format break at that step
+means the bump needs a migration plan, not a lockfile change.
+
+## sequential-storage "latest stable" MSRV policy
+
+### Affected version
+
+`sequential-storage = 8.0.1` ; the risk is any future release.
+
+### Behaviour
+
+Upstream's stated MSRV policy is "latest stable Rust" : a Rust
+version bump is not considered breaking and can arrive in any
+release, including a patch. This workspace pins MSRV 1.89.0 in
+lock-step across the toolchain file, manifests and CI ; any
+sequential-storage release may silently require a newer
+compiler and fail the whole workspace build.
+
+### Workaround
+
+The version pin (below) prevents any release from arriving
+unreviewed, which subsumes the MSRV exposure.
+
+### Why we accept
+
+The policy is upstream's to set ; within a pinned version the
+MSRV cannot move, so the exposure exists only at bump time,
+which the pin already forces through review.
+
+### Mechanical anchor
+
+Same two anchors as the format entry : the `deny.toml` envelope
+and `crates/arxia-storage-flash/tests/version_pin.rs`. The
+workspace MSRV itself is enforced by the LOW-014 pin test in
+`arxia-core`.
+
+### Regression detection
+
+At every bump review, `cargo +1.89.0 build -p
+arxia-storage-flash` (or the then-current pinned toolchain) is
+part of the gate before the pin moves.
+
+## sequential-storage single-poll completion is not a contract
+
+### Affected version
+
+`sequential-storage = 8.0.1`.
+
+### Behaviour
+
+The crate's API is async, but in 8.0.1 its futures never pend of
+their own accord : no `Poll::Pending`, `Waker` or `poll_fn`
+appears anywhere in its source, and its futures await only the
+flash driver. Over a synchronous driver — which is what an ESP32
+SPI flash is — every future completes on the first poll,
+measured by probe at adoption. `arxia-storage-flash` bridges to
+the synchronous `StorageBackend` trait on exactly this property :
+it polls once and never loops. Nothing upstream promises any of
+this ; it is an implementation detail of the pinned version, and
+a future release may lawfully introduce a genuine await point.
+
+### Workaround
+
+The bridge treats `Poll::Pending` as a typed fault
+(`StorageFault::WouldBlock`) rather than spinning : if the
+assumption ever breaks, every affected operation fails loudly
+and immediately instead of hanging a node in silence. The guard
+lives in the crate driver (`poll_once`) and its test suite.
+
+### Why we accept
+
+The alternative is carrying an async executor on a 520 KB
+device to wait for a flash that never actually suspends. The
+guard converts the residual risk from "silent hang" to "typed
+error at the first affected operation", which the node can
+surface.
+
+### Mechanical anchor
+
+The version pin (`deny.toml` +
+`crates/arxia-storage-flash/tests/version_pin.rs`), plus the
+`poll_once` guard and its deliberately-pending-future test
+(`a_pending_future_is_a_typed_fault_never_a_second_poll` in
+`crates/arxia-storage-flash/tests/single_poll.rs`).
+
+### Regression detection
+
+At every bump review, the single-poll probe is re-run against
+the candidate version : grep its source for `Poll::Pending`,
+`Waker` and `poll_fn`, and run every operation of the probe
+suite counting polls. One poll each, or the bump does not land.
+
+## sequential-storage iteration order is not a contract
+
+### Affected version
+
+`sequential-storage = 8.0.1`.
+
+### Behaviour
+
+`fetch_all_items` yields items in write order, not key order,
+and an overwritten key is yielded once per surviving version,
+oldest first ; removed keys are not yielded at all. All three
+behaviours were established by probe at adoption — none of them
+is documented as a promise. The `StorageBackend` trait requires
+ascending lexicographic key order with one entry per live key,
+so `arxia-storage-flash` builds its ordered scan (the bounded
+sorted window with last-occurrence-wins resolution) on top of
+these measured semantics. A future release may lawfully change
+any of them — start yielding tombstones, change duplicate
+handling, or reorder iteration entirely.
+
+### Workaround
+
+The ordering layer assumes nothing about the input order (it
+sorts), resolves duplicates by taking the last occurrence, and
+the conformance suite pins the externally visible result :
+ascending order, one entry per live key, deleted keys absent.
+A semantics change upstream surfaces as failing conformance
+tests, not as wrong scan results in production.
+
+### Why we accept
+
+Compensating in one place (the windowed scan) against measured
+semantics, with the suite as a tripwire, was judged sounder
+than depending on an ordering guarantee upstream never made.
+
+### Mechanical anchor
+
+The version pin (`deny.toml` +
+`crates/arxia-storage-flash/tests/version_pin.rs`), plus the
+shared conformance checks and the overwrite/deleted-key
+fixtures in `arxia-storage-flash`.
+
+### Regression detection
+
+At every bump review, the iteration probe is re-run against the
+candidate version (insertion order vs iteration order, overwrite
+yielding, removed-key behaviour), and the full
+`arxia-storage-flash` suite — conformance, window mechanics and
+power-cut sweeps — must be green before the pin moves.
+
 ## Adding a new entry to this document
 
 When a new dependency is identified as having a build-script,

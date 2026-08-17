@@ -185,6 +185,15 @@ Each line falsifies a tagged assumption above:
    crash-atomicity and process-death durability, not power-loss). The
    flash backend inherits the same `StorageBackend` atomicity
    contract, and the plug-pull is its kill-nine.
+6. **Log length under scan** — count item reads per `scan_prefix`
+   call and compare against the section-8 prediction. The term to
+   watch is `n_log`, not `n_live`: it is the one that drifts with
+   every overwrite until compaction, and it is the quantity the
+   prediction stands or falls on.
+7. **Batch write amplification** — count flash appends per
+   `apply_batch` against the x2 payload prediction of section 8
+   (journal + apply). The seal's cost is part of the wear model, not
+   an implementation detail.
 
 ## 7. Design requirement carried forward to `arxia-storage-flash`
 
@@ -192,10 +201,76 @@ sequential-storage is power-fail safe **per item** (CRC-protected,
 recoverable). The `StorageBackend` contract requires atomicity **per
 batch** — a torn `add_block` batch is exactly the corruption the trait
 documentation forbids (a `send_index` entry whose block was never
-written is spendable value no chain records). The flash backend will
-therefore need a batch seal on top of per-item safety: a commit-marker
-item written last, with mount-time recovery ignoring any items past
-the last seal — the same "the marker and the data are one statement"
-construction the redb kill-nine test uses. That design belongs to the
-`arxia-storage-flash` step and is recorded here only so the
-requirement is not rediscovered late.
+written is spendable value no chain records). `arxia-storage-flash`
+therefore carries a batch seal on top of per-item safety: every
+operation is journalled under a reserved key namespace, a commit
+marker (carrying the operation count) is written as
+the single commit point, the operations are applied, and the journal
+and marker are cleared — with mount-time recovery replaying a marked
+journal to completion and discarding an unmarked one. Its cut-point
+sweeps live in the crate's `power_cut.rs`.
+
+## 8. Scan and batch cost model (arxia-storage-flash)
+
+Two costs the backend adds on top of raw appends, in the terms the
+bench measures.
+
+**Ordered scan.** The log iterates in write order; the trait promises
+key order. The backend makes repeated passes, each collecting the
+`SCAN_WINDOW` (= 8 [assumed], compile-time) smallest keys above the
+last emitted, so a scan of `n_live` matching keys costs
+
+```
+ceil(n_live / SCAN_WINDOW) x n_log        item reads   [derived]
+```
+
+A pass that collects fewer keys than the window holds ends the scan
+without another read of the log, so the formula is exact on the
+dominant path; only when `n_live` is an exact multiple of
+`SCAN_WINDOW` does one extra full-log pass confirm termination
+[derived].
+
+where `n_log` is the **entire log length, dead versions included** —
+every overwrite of a live key grows `n_log` by one until compaction
+reclaims the space. `n_live` is bounded by the working set; `n_log`
+is bounded only by capacity, which is why measurement line 6 tracks
+it directly. The realistic access pattern is one account chain under
+its own prefix (tens of keys, one or two passes); a whole-store scan
+is a conformance exercise, not a node operation [assumed — the bench
+confirms the access pattern].
+
+**Batch seal.** Every batched operation is written twice — once into
+the journal, once applied — plus one marker item per batch:
+
+```
+appends(batch of k ops) = 2k + 1          items        [derived]
+```
+
+so a batch costs twice its payload in flash appends, and the
+section-5 erase predictions for batch-heavy scenarios scale
+accordingly. The journal and marker items are themselves reclaimed
+by compaction like any other overwritten item.
+
+**Recovery cost.** On the clean path a batch performs no RECOVERY
+scans: a RAM health cell (three states - clean, pre-commit debris,
+committed-pending) records what the journal may hold, set at mount and
+after every successful batch [derived]. Only after an actual failure
+does the next operation scan the log to finish or discard the
+interrupted batch, which costs one full-log read - `n_log` item reads
+- per recovery attempt [derived]. Mount always runs one such scan.
+
+**Apply cost on the current happy path - what the bench WILL see.**
+The successful batch does not, today, apply from the operations it
+holds in RAM: after the marker lands it re-reads each of its `k`
+journal entries from flash and applies from those, then removes each
+entry - one point lookup plus one `remove_item` per operation, and
+each of those is a log search (`remove_item` in particular walks the
+log; the engine's own documentation flags it as slow). Steady-state
+batch cost is therefore `2k + 1` appends PLUS on the order of `2k`
+log searches [derived from the code as written]. This is not drift and
+must not be attributed to the hardware: it is the current
+implementation, and a follow-up issue replaces it by applying from the
+validated in-RAM slice with the same erase-as-you-go capacity profile,
+which removes the `k` re-reads and leaves the `k` removes. The bench
+compares against THIS paragraph until that issue lands, then against
+the revised figure.

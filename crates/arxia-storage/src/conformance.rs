@@ -346,6 +346,117 @@ pub fn batch_atomicity_holds<B: StorageBackend>(b: &mut B) -> bool {
 /// the generic function to run against a fresh backend instance.
 pub type NamedCheck<B> = (&'static str, fn(&mut B));
 
+/// A protocol-sized value: the compact block is 193 bytes, and a
+/// backend test anywhere in the workspace should reach for this
+/// instead of minting its own copy - the sizes are part of what the
+/// suite tests, and copies drift.
+///
+/// Original rationale: a
+/// backend that only ever sees three-byte test payloads can hide a
+/// capacity bug that fires on the very first real block. Every batch
+/// check below carries one.
+pub fn realistic_value(tag: u8) -> Vec<u8> {
+    let mut v = vec![tag; 193];
+    v[0] = 0xAB; // a marker so a truncated write is visible
+    v
+}
+
+/// A protocol-sized key: `c:` plus a 64-hex-char account plus a nonce
+/// suffix is what an account-chain key actually looks like.
+pub fn realistic_key(suffix: &str) -> Vec<u8> {
+    let mut k = b"c:".to_vec();
+    k.extend_from_slice(&[b'a'; 64]);
+    k.push(b':');
+    k.extend_from_slice(suffix.as_bytes());
+    k
+}
+
+/// A batch carrying a protocol-sized block under a protocol-sized key.
+///
+/// This is the crate's whole reason to exist, and it is exactly the
+/// case a backend can fail while passing every toy-sized check: an
+/// embedded backend that journals a batch operation as
+/// `tag + key + value` needs room for more than one payload, and a cap
+/// applied to the whole record rather than to the payload rejects the
+/// first real block it ever sees.
+pub fn check_a_batch_carries_a_protocol_sized_block<B: StorageBackend>(b: &mut B) {
+    let key = realistic_key("0001");
+    let value = realistic_value(0x11);
+    b.apply_batch(&[BatchOp::Put {
+        key: &key,
+        value: &value,
+    }])
+    .expect("a batch must accept a protocol-sized block under a chain key");
+
+    assert_eq!(
+        b.get(&key).unwrap().as_deref(),
+        Some(value.as_slice()),
+        "the block must come back byte-for-byte"
+    );
+    assert_eq!(
+        collect_prefix(b, b"c:"),
+        vec![(key, value)],
+        "and be visible to a scan"
+    );
+}
+
+/// A whole transfer's worth of writes in one batch, at real sizes: two
+/// blocks and the index maintenance that accompanies them.
+pub fn check_a_transfer_sized_batch_applies_atomically<B: StorageBackend>(b: &mut B) {
+    let send = realistic_key("0007");
+    let recv = realistic_key("0008");
+    let index = b"s:0123456789abcdef".to_vec();
+    let sv = realistic_value(0x22);
+    let rv = realistic_value(0x33);
+
+    b.apply_batch(&[
+        BatchOp::Put {
+            key: &send,
+            value: &sv,
+        },
+        BatchOp::Put {
+            key: &recv,
+            value: &rv,
+        },
+        BatchOp::Put {
+            key: &index,
+            value: b"destination+amount",
+        },
+    ])
+    .expect("a transfer-sized batch must apply");
+
+    assert_eq!(b.get(&send).unwrap().as_deref(), Some(sv.as_slice()));
+    assert_eq!(b.get(&recv).unwrap().as_deref(), Some(rv.as_slice()));
+    assert!(b.contains(&index).unwrap());
+}
+
+/// A key no realistic schema stores must read as absent, never as an
+/// error.
+///
+/// A bounded backend cannot store a 200-byte key; the truthful answer
+/// to "what does it hold?" is still "nothing", exactly as an
+/// unbounded backend answers for a key nobody wrote. A read that
+/// errs on an unstorable key splits the backends' behaviour on the
+/// reads the trait promises are total, and callers start needing
+/// backend-specific error handling on the lookup path.
+pub fn check_unstorable_keys_read_as_absent<B: StorageBackend>(b: &mut B) {
+    let oversized = vec![b'k'; 200];
+    assert_eq!(
+        b.get(&oversized).expect("get is total"),
+        None,
+        "a key that cannot exist reads as absent"
+    );
+    assert!(
+        !b.contains(&oversized).expect("contains is total"),
+        "and is not contained"
+    );
+    assert!(
+        !b.delete(&oversized)
+            .expect("delete of an absent key is total"),
+        "and deleting it deletes nothing"
+    );
+}
+
 /// Every scan/batch check in this module, as `(name, function)` pairs,
 /// so a backend crate can also run the whole suite in one loop if it
 /// prefers that over per-check wrappers. Kept in one place so a check
@@ -407,6 +518,18 @@ pub fn all_checks<B: StorageBackend>() -> Vec<NamedCheck<B>> {
         (
             "an_empty_batch_is_a_no_op",
             check_an_empty_batch_is_a_no_op::<B>,
+        ),
+        (
+            "a_batch_carries_a_protocol_sized_block",
+            check_a_batch_carries_a_protocol_sized_block::<B>,
+        ),
+        (
+            "a_transfer_sized_batch_applies_atomically",
+            check_a_transfer_sized_batch_applies_atomically::<B>,
+        ),
+        (
+            "unstorable_keys_read_as_absent",
+            check_unstorable_keys_read_as_absent::<B>,
         ),
     ]
 }
