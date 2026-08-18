@@ -54,6 +54,7 @@ flash_conformance!(
     check_a_batch_carries_a_protocol_sized_block,
     check_a_transfer_sized_batch_applies_atomically,
     check_unstorable_keys_read_as_absent,
+    check_write_refusals_are_typed_and_leave_the_store_intact,
 );
 
 /// The same drift guard the other backends carry: a check added to
@@ -62,7 +63,7 @@ flash_conformance!(
 #[test]
 fn every_registered_check_passes() {
     let checks = conformance::all_checks::<FlashStorage<Flash>>();
-    assert_eq!(checks.len(), 17, "wrapper list above may be stale");
+    assert_eq!(checks.len(), 18, "wrapper list above may be stale");
     for (_name, check) in checks {
         let mut store = fresh();
         check(&mut store);
