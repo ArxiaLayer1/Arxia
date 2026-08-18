@@ -259,18 +259,29 @@ does the next operation scan the log to finish or discard the
 interrupted batch, which costs one full-log read - `n_log` item reads
 - per recovery attempt [derived]. Mount always runs one such scan.
 
-**Apply cost on the current happy path - what the bench WILL see.**
-The successful batch does not, today, apply from the operations it
-holds in RAM: after the marker lands it re-reads each of its `k`
-journal entries from flash and applies from those, then removes each
-entry - one point lookup plus one `remove_item` per operation, and
-each of those is a log search (`remove_item` in particular walks the
-log; the engine's own documentation flags it as slow). Steady-state
-batch cost is therefore `2k + 1` appends PLUS on the order of `2k`
-log searches [derived from the code as written]. This is not drift and
-must not be attributed to the hardware: it is the current
-implementation, and a follow-up issue replaces it by applying from the
-validated in-RAM slice with the same erase-as-you-go capacity profile,
-which removes the `k` re-reads and leaves the `k` removes. The bench
-compares against THIS paragraph until that issue lands, then against
-the revised figure.
+**Apply cost on the happy path - measured, what the bench compares
+against.** The successful batch applies from the operations the caller
+passed in, still in RAM when the marker lands; only recovery re-reads
+the journal. Measured on the pinned engine, k = 3, protocol-sized
+values, seeded 64 KiB mock region [measured, fixture
+`a_successful_batch_applies_from_ram_without_journal_rereads`]:
+
+| primitive on this store            | reads |
+|------------------------------------|-------|
+| point lookup (hit or miss)         | 9     |
+| `store_item` (new key or overwrite)| 7-8   |
+| `remove_item` (item present)       | ~44   |
+| whole batch, k = 3 (old, re-fetch) | 347   |
+| whole batch, k = 3 (current)       | 296   |
+
+The re-fetch removal saved ~17 reads per operation. What the same
+measurement exposed is where the seal's cost really lives: each
+journal-entry erase is a `remove_item`, and the engine must LOCATE the
+item to tombstone it - roughly five times the cost of a write. A batch
+of k operations therefore costs `2k + 1` appends plus roughly
+`k` cheap writes + `(k + 1)` remove_item walks + the applied deletes'
+own walks [derived from the table]. This is the current implementation
+and the bench compares against THIS table; a future change to the
+seal's erase discipline (e.g. leaving journal entries to be
+overwritten by the next batch instead of tombstoning them) would be a
+separate, measured decision, not drift.
