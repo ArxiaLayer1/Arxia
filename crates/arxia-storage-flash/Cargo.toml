@@ -19,7 +19,12 @@ embedded-storage-async = { version = "0.4.1", default-features = false }
 # test harness.
 default = []
 std = ["arxia-core/std", "arxia-storage/std", "sequential-storage/std"]
+# The shared fault-injecting mock, for this crate's tests and for any
+# crate that judges the backend (the bench protocol crate). Implies
+# std; nothing on the target compiles it.
+testing = ["std", "sequential-storage/_test", "sequential-storage/alloc"]
 
 [dev-dependencies]
+arxia-storage-flash = { path = ".", features = ["testing"] }
 arxia-storage = { path = "../arxia-storage", features = ["conformance"] }
 sequential-storage = { workspace = true, features = ["_test", "alloc", "std"] }

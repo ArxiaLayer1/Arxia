@@ -148,6 +148,9 @@
 
 extern crate alloc;
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::cmp::Ordering;
