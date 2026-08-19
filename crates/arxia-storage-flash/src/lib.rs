@@ -65,8 +65,10 @@
 //!    plausible small count) is written - this single item is the
 //!    commit point;
 //! 3. each operation is applied to its real key and its journal
-//!    entry erased, in order - safe because the count in the marker
-//!    makes an already-erased entry a no-op, not an early stop;
+//!    entry erased, in order - from the caller's operations still in
+//!    RAM on the in-process path, from the journal on recovery - safe
+//!    because the count in the marker makes an already-erased entry
+//!    a no-op, not an early stop;
 //! 4. the marker is cleared last of all.
 //!
 //! A power cut before step 2 leaves a journal with no marker, which
@@ -803,6 +805,35 @@ impl<S: MultiwriteNorFlash, const W: usize> FlashStorage<S, W> {
         Ok(())
     }
 
+    /// Apply a committed batch from the operations still in RAM.
+    ///
+    /// The happy path's twin of [`Self::replay_journal`]. Recovery
+    /// must re-read the journal because RAM is gone; the in-process
+    /// path still holds the caller's operations, already validated
+    /// before the first journal write, so re-fetching each entry from
+    /// flash and re-parsing it would spend `k` log searches to learn
+    /// what it already knows. Same discipline otherwise: apply one
+    /// operation, erase its journal entry, move on, marker last -
+    /// the erase-as-you-go capacity profile is unchanged, and so is
+    /// idempotence, since a cut anywhere in here leaves a marked
+    /// journal that [`Self::replay_journal`] finishes from flash.
+    ///
+    /// The ops slice and the journal are the same batch by
+    /// construction (this is called only from `apply_batch`, right
+    /// after that batch's own journaling), so entry `i` on flash and
+    /// `ops[i]` in RAM describe one operation.
+    fn apply_from_ram(&self, ops: &[BatchOp<'_>]) -> Result<(), ArxiaError> {
+        for (index, op) in ops.iter().enumerate() {
+            match op {
+                BatchOp::Put { key, value } => self.store_raw(key, value)?,
+                BatchOp::Delete { key } => self.erase(key)?,
+            }
+            self.erase(&journal_key(index as u16))?;
+        }
+        self.erase(&MARKER_KEY)?;
+        Ok(())
+    }
+
     /// Remove journal entries left by a batch that never committed.
     fn discard_journal(&self) -> Result<(), ArxiaError> {
         let mut stale: Vec<[u8; JOURNAL_KEY_LEN]> = Vec::new();
@@ -1203,8 +1234,10 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
             return Err(e);
         }
 
-        // Steps 3 and 4. A transient fault mid-replay gets one inline
-        // retry, so this method never leaves a committed batch half
+        // Steps 3 and 4, applied from the ops still in RAM (recovery
+        // re-reads the journal; the in-process path has no need to).
+        // A transient fault mid-apply gets one inline retry through
+        // recovery, so this method never leaves a committed batch half
         // applied while the flash is answering: either the retry
         // finishes the batch and this call reports the success it is,
         // or the store is marked pending and every subsequent
@@ -1219,7 +1252,7 @@ impl<S: MultiwriteNorFlash, const W: usize> StorageBackend for FlashStorage<S, W
         // corruption, which no retry will ever fix - that fault
         // propagates as itself, because "will converge" would be a
         // lie.
-        match self.replay_journal(count) {
+        match self.apply_from_ram(ops) {
             Ok(()) => Ok(()),
             Err(_first) => {
                 self.health.set(Health::Pending);
