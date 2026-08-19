@@ -26,6 +26,7 @@
 //! backend, and need to run only once.
 
 use crate::{BatchOp, StorageBackend};
+use arxia_core::{ArxiaError, StorageFault};
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -457,6 +458,101 @@ pub fn check_unstorable_keys_read_as_absent<B: StorageBackend>(b: &mut B) {
     );
 }
 
+/// A write the backend refuses leaves the store byte-for-byte
+/// unchanged, and reads keep answering; a write it does not refuse
+/// lands in full. Either way, the refusal classes are the two the
+/// trait licenses and no other.
+///
+/// The probe is a value larger than any bounded backend stores (a
+/// 4 KiB payload under a valid key). An unbounded backend accepts it -
+/// the check then holds it to full round-trip. A bounded backend
+/// refuses it - the check then holds the refusal to the licensed
+/// class, the store to unchanged, and reads to answering. Both
+/// branches are exercised on every backend the suite runs against, so
+/// a backend that refused with a foreign class, or that partially
+/// wrote before refusing, or that stopped answering reads after a
+/// refusal, fails here regardless of which side of the bound it sits.
+pub fn check_write_refusals_are_typed_and_leave_the_store_intact<B: StorageBackend>(b: &mut B) {
+    b.put(b"w:anchor", b"anchor").unwrap();
+    let key = b"w:probe";
+    let huge = vec![0xC7u8; 4096];
+
+    match b.put(key, &huge) {
+        Ok(()) => {
+            assert_eq!(
+                b.get(key).unwrap().as_deref(),
+                Some(huge.as_slice()),
+                "an accepted write lands in full"
+            );
+        }
+        Err(e) => {
+            assert!(
+                matches!(
+                    e,
+                    ArxiaError::Storage {
+                        fault: StorageFault::CapacityExceeded { .. }
+                    } | ArxiaError::Storage {
+                        fault: StorageFault::ReservedKey
+                    }
+                ),
+                "a write refusal must be one of the two licensed classes, got: {e}"
+            );
+            assert_eq!(
+                b.get(key).unwrap(),
+                None,
+                "a refused write leaves nothing behind"
+            );
+        }
+    }
+    // The store around the probe is untouched either way, and reads
+    // still answer.
+    assert_eq!(
+        b.get(b"w:anchor").unwrap().as_deref(),
+        Some(b"anchor".as_slice()),
+        "a refusal never disturbs neighbouring keys"
+    );
+
+    // The same contract through the batch path: a batch carrying the
+    // probe is accepted whole or refused whole.
+    let before = collect_prefix(b, b"w:");
+    match b.apply_batch(&[
+        BatchOp::Put {
+            key: b"w:batch-a",
+            value: b"a",
+        },
+        BatchOp::Put {
+            key: b"w:batch-probe",
+            value: &huge,
+        },
+    ]) {
+        Ok(()) => {
+            assert!(b.contains(b"w:batch-a").unwrap());
+            assert_eq!(
+                b.get(b"w:batch-probe").unwrap().as_deref(),
+                Some(huge.as_slice())
+            );
+        }
+        Err(e) => {
+            assert!(
+                matches!(
+                    e,
+                    ArxiaError::Storage {
+                        fault: StorageFault::CapacityExceeded { .. }
+                    } | ArxiaError::Storage {
+                        fault: StorageFault::ReservedKey
+                    }
+                ),
+                "a batch refusal must be one of the two licensed classes, got: {e}"
+            );
+            assert_eq!(
+                collect_prefix(b, b"w:"),
+                before,
+                "a refused batch leaves the store byte-for-byte as it was"
+            );
+        }
+    }
+}
+
 /// Every scan/batch check in this module, as `(name, function)` pairs,
 /// so a backend crate can also run the whole suite in one loop if it
 /// prefers that over per-check wrappers. Kept in one place so a check
@@ -530,6 +626,10 @@ pub fn all_checks<B: StorageBackend>() -> Vec<NamedCheck<B>> {
         (
             "unstorable_keys_read_as_absent",
             check_unstorable_keys_read_as_absent::<B>,
+        ),
+        (
+            "write_refusals_are_typed_and_leave_the_store_intact",
+            check_write_refusals_are_typed_and_leave_the_store_intact::<B>,
         ),
     ]
 }

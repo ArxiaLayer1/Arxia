@@ -131,6 +131,26 @@ pub enum BatchOp<'a> {
 /// it once chains are keyed by a big-endian nonce suffix.
 pub trait StorageBackend {
     /// Store a value under the given key.
+    ///
+    /// # Write refusals
+    ///
+    /// A backend may refuse a write - here, in [`Self::delete`], and in
+    /// [`Self::apply_batch`] - for exactly two typed reasons, and no
+    /// other:
+    ///
+    /// - [`StorageFault::CapacityExceeded`]: the key or value exceeds
+    ///   a fixed bound the backend cannot store (an embedded backend
+    ///   holds keys and values in bounded buffers).
+    /// - [`StorageFault::ReservedKey`]: the key lies in a namespace the
+    ///   backend keeps for its own bookkeeping.
+    ///
+    /// A refusal is a **refusal, never a partial write**: the store is
+    /// byte-for-byte as it was before the call, and reads keep
+    /// answering. Backends without such bounds (the in-memory and redb
+    /// ones) never return either fault - they accept the write in
+    /// full. Reads stay total across all backends: a key that cannot
+    /// be stored reads as absent, never as an error (see the
+    /// conformance check `unstorable_keys_read_as_absent`).
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), ArxiaError>;
     /// Retrieve a value by key.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ArxiaError>;
@@ -138,6 +158,11 @@ pub trait StorageBackend {
     /// existed and was removed, `Ok(false)` if the key was already
     /// absent. See HIGH-021 in the module docstring for the
     /// rationale.
+    ///
+    /// A delete is a write and may be refused for the two reasons
+    /// listed on [`Self::put`]; a delete of an unstorable key that the
+    /// backend does NOT reserve is simply `Ok(false)` - the key cannot
+    /// exist, so nothing was deleted.
     fn delete(&mut self, key: &[u8]) -> Result<bool, ArxiaError>;
     /// Check if a key exists.
     fn contains(&self, key: &[u8]) -> Result<bool, ArxiaError>;
