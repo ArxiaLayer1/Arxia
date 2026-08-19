@@ -30,6 +30,16 @@ flash backend what kill-nine is to the redb backend, one layer lower.
   criteria below, is the firmware's own tag, recovered by parsing
   the values it wrote. A bench built without those tags cannot run
   this protocol.
+
+  **This protocol is code**: `crates/arxia-flash-bench` implements
+  the tagged batch, the boot-time audit, the failure criteria as an
+  enum, and the boot decision, generic over the flash driver and the
+  serial sink; it is tested on a host against the same
+  fault-injecting mock the backend uses, and compiled for the
+  bare-metal target by CI. The board firmware is a thin adapter that
+  supplies the driver and the sink and calls `boot`. When this
+  document and that crate disagree, the crate is the bug or this
+  document is - never both correct.
 - The erase/write counting adapter stays enabled; its numbers feed
   the endurance model comparison as a side product.
 
@@ -52,7 +62,10 @@ flash backend what kill-nine is to the redb backend, one layer lower.
      both blocks and the index entry, byte-for-byte;
    - no key under the reserved `0x00` namespace is visible;
    - the highest complete sequence number is recorded and never
-     decreases across the run.
+     decreases across the run — "recorded" meaning persisted on the
+     medium by the firmware itself under its own key after every
+     successful batch (RAM does not survive a cut), and echoed on the
+     serial line so an operator can cross-check off-device.
    The audit result is written to serial output and logged off the
    device before traffic resumes.
 4. **Repeat.** Minimum 100 pulls before the run counts as a result.

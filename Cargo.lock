@@ -153,6 +153,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arxia-flash-bench"
+version = "0.1.0"
+dependencies = [
+ "arxia-core",
+ "arxia-storage",
+ "arxia-storage-flash",
+ "embedded-storage-async",
+]
+
+[[package]]
 name = "arxia-gossip"
 version = "0.1.0"
 dependencies = [
@@ -239,6 +249,7 @@ version = "0.1.0"
 dependencies = [
  "arxia-core",
  "arxia-storage",
+ "arxia-storage-flash",
  "embedded-storage-async",
  "sequential-storage",
 ]
