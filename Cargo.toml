@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# The bench firmware builds with the Xtensa fork toolchain, not the
+# workspace's pinned 1.89.0; it is its own project with its own lockfile.
+exclude = ["targets/esp32-bench"]
 members = [
     "crates/arxia-core",
     "crates/arxia-crypto",

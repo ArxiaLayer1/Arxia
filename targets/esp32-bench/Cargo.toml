@@ -1,0 +1,46 @@
+[package]
+name = "arxia-esp32-bench"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95.0"
+license = "Apache-2.0 OR MIT"
+description = "Power-loss bench firmware for the T-Beam: the thin adapter that gives arxia-flash-bench a real flash chip and a serial line"
+authors = []
+
+[[bin]]
+name = "arxia-esp32-bench"
+path = "./src/bin/main.rs"
+
+[dependencies]
+# The protocol, and the storage stack it judges. Path dependencies:
+# this firmware is versioned with the crates it exercises.
+arxia-flash-bench = { path = "../../crates/arxia-flash-bench", default-features = false }
+arxia-storage = { path = "../../crates/arxia-storage", default-features = false }
+arxia-storage-flash = { path = "../../crates/arxia-storage-flash", default-features = false }
+
+# The board: HAL, bootloader descriptor, heap, panic-to-serial, serial.
+esp-hal = { version = "~1.1.0", features = ["esp32"] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
+critical-section = "1.2.0"
+esp-alloc = "0.10.0"
+esp-backtrace = { version = "0.19.0", features = ["esp32", "panic-handler", "println"] }
+esp-println = { version = "0.17.0", features = ["esp32"] }
+
+# The flash driver and the blocking-to-async bridge esp-storage's own
+# documentation names for exactly this composition. In the released
+# 0.9.0 the embedded-storage trait impls are unconditional.
+esp-storage = { version = "0.9.0", features = ["esp32", "critical-section"] }
+embassy-embedded-hal = { version = "0.6.0", default-features = false }
+embedded-storage = "0.3.1"
+
+# For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+# Always build with some optimizations enabled.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1     # LLVM can perform better optimizations using a single thread
+debug         = 2     # prefer slower builds but better debugging experience
+lto           = 'fat'
+opt-level     = 's'
