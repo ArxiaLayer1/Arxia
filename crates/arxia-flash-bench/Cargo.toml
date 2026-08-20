@@ -1,0 +1,23 @@
+[package]
+name = "arxia-flash-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The power-loss bench protocol for the flash backend, as code: tagged batch traffic, the boot-time audit, and the counters - generic over the flash driver and the output sink"
+authors = []
+
+[dependencies]
+arxia-core = { path = "../arxia-core", default-features = false }
+arxia-storage = { path = "../arxia-storage", default-features = false }
+arxia-storage-flash = { path = "../arxia-storage-flash", default-features = false }
+embedded-storage-async = { version = "0.4.1", default-features = false }
+
+[features]
+# std is off by default: this crate exists to run on the board. A std
+# build is only ever the host-side test harness.
+default = []
+std = ["arxia-core/std", "arxia-storage/std", "arxia-storage-flash/std"]
+
+[dev-dependencies]
+arxia-storage-flash = { path = "../arxia-storage-flash", features = ["testing"] }
