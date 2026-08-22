@@ -35,6 +35,21 @@
 //! the loop reports erases, writes and reads periodically, so the
 //! endurance model meets its numbers.
 //!
+//! # Bounded slots, unbounded run
+//!
+//! Batch keys rotate over a bounded window of [`SLOTS`] slots
+//! (`slot = seq % SLOTS`) while values stay tagged with the full,
+//! monotonically increasing sequence. Per-sequence keys would only
+//! append: the live set would grow by roughly a kibibyte per batch
+//! until the region returned `FullStorage` a few minutes in - and an
+//! append-only bench barely touches page reclamation, which is the
+//! wear mechanism the endurance model prices in wraps. Rotation keeps
+//! the live set tens of times smaller than the region, so the log
+//! wraps and reclaims indefinitely, and the seal is what makes the
+//! rotation sound: a slot overwrite is one batch, so a cut leaves the
+//! slot wholly on its old sequence or wholly on its new one, never
+//! mixed - and the audit checks exactly that.
+//!
 //! # What "highest sequence never decreases" needs
 //!
 //! The firmware loses RAM at every cut, so "recorded before" must be
@@ -66,6 +81,19 @@ pub const INDEX_PREFIX: &[u8] = b"s:";
 /// outside every prefix the audit walks as batch data.
 pub const HIGH_WATER_KEY: &[u8] = b"b:high";
 
+/// The rotation window: how many distinct key sets the bench rewrites.
+///
+/// The live set is `SLOTS` batches plus the high-water mark; with
+/// protocol-sized values that is a few tens of kibibytes against a
+/// region of a mebibyte, which leaves the engine a deep log to wrap
+/// through - reclamation traffic, not just storage.
+pub const SLOTS: u32 = 64;
+
+/// The slot a sequence lands in.
+pub const fn slot_of(seq: u32) -> u32 {
+    seq % SLOTS
+}
+
 /// Size of a bench block value: the compact block, 193 bytes.
 pub const BLOCK_LEN: usize = 193;
 /// Size of a bench index value.
@@ -74,10 +102,10 @@ pub const INDEX_LEN: usize = 32;
 /// One bench batch: two blocks and an index entry, all tagged with the
 /// same sequence.
 ///
-/// Keys are derived from the sequence so every batch has its own; the
-/// store therefore grows with traffic exactly as a ledger does, and
-/// the log's dead-version growth - the `n_log` term the endurance
-/// model tracks - is exercised for real.
+/// Keys derive from the batch's SLOT ([`slot_of`]), values from the
+/// full sequence: sequence `s` and `s + SLOTS` write the same three
+/// keys with different bytes. The overwrite is one batch, so the seal
+/// makes it atomic under a cut.
 pub struct BenchBatch {
     /// The sequence this batch carries.
     pub seq: u32,
@@ -90,9 +118,10 @@ pub struct BenchBatch {
 impl BenchBatch {
     /// Build the batch for `seq`.
     pub fn new(seq: u32) -> Self {
+        let slot = slot_of(seq);
         Self {
             seq,
-            keys: [chain_key(seq, 0), chain_key(seq, 1), index_key(seq)],
+            keys: [chain_key(slot, 0), chain_key(slot, 1), index_key(slot)],
             values: [
                 tagged_value(seq, BLOCK_LEN, 0x10),
                 tagged_value(seq, BLOCK_LEN, 0x20),
@@ -120,30 +149,30 @@ impl BenchBatch {
     }
 }
 
-/// A chain key for `seq`, block `n`: `c:` + a 64-hex-char account
-/// derived from the sequence + `:` + the block index. Protocol-sized,
+/// A chain key for `slot`, block `n`: `c:` + a 64-hex-char account
+/// derived from the slot + `:` + the block index. Protocol-sized,
 /// like the conformance fixture's.
-pub fn chain_key(seq: u32, n: u8) -> Vec<u8> {
+pub fn chain_key(slot: u32, n: u8) -> Vec<u8> {
     let mut k = Vec::with_capacity(72);
     k.extend_from_slice(CHAIN_PREFIX);
     let hex = b"0123456789abcdef";
-    // 64 hex chars: the sequence spread across them so keys differ,
+    // 64 hex chars: the slot spread across them so keys differ,
     // deterministic so the audit can recompute them.
     for i in 0..64u32 {
-        let nibble = (seq.wrapping_mul(0x9E37_79B9).rotate_left(i % 32) >> (i % 28)) & 0xF;
+        let nibble = (slot.wrapping_mul(0x9E37_79B9).rotate_left(i % 32) >> (i % 28)) & 0xF;
         k.push(hex[nibble as usize]);
     }
     k.push(b':');
-    k.extend_from_slice(&seq.to_be_bytes());
+    k.extend_from_slice(&slot.to_be_bytes());
     k.push(n);
     k
 }
 
-/// The index key for `seq`.
-pub fn index_key(seq: u32) -> Vec<u8> {
+/// The index key for `slot`.
+pub fn index_key(slot: u32) -> Vec<u8> {
     let mut k = Vec::with_capacity(8);
     k.extend_from_slice(INDEX_PREFIX);
-    k.extend_from_slice(&seq.to_be_bytes());
+    k.extend_from_slice(&slot.to_be_bytes());
     k
 }
 
@@ -176,12 +205,13 @@ pub fn tag_of(value: &[u8]) -> Option<u32> {
 /// protocol; [`AuditReport::verdict`] maps to its failure criteria.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditReport {
-    /// Distinct sequences seen under the batch prefixes.
-    pub sequences_seen: usize,
-    /// Sequences whose three keys all carry the exact tagged bytes.
+    /// Slots holding any data at all.
+    pub slots_occupied: usize,
+    /// Slots whose three keys all carry one sequence's exact bytes.
     pub complete: usize,
-    /// Sequences with some but not all keys carrying the new state -
-    /// the state the seal exists to forbid.
+    /// Slots in any other occupied state - a missing key, a foreign
+    /// or mixed tag, a wrong body: the states the seal exists to
+    /// forbid, identified by slot index.
     pub partial: Vec<u32>,
     /// Keys visible to the walk that begin with the reserved byte.
     pub reserved_visible: usize,
@@ -196,7 +226,8 @@ pub struct AuditReport {
 pub enum Verdict {
     /// Every criterion held.
     Pass,
-    /// A sequence has some but not all of its keys - partial batch.
+    /// A slot holds a torn state: a missing key, a mixed or foreign
+    /// tag, or a wrong body - partial batch.
     PartialBatch,
     /// A reserved-namespace key reached the audit walk.
     ReservedVisible,
@@ -228,35 +259,19 @@ impl AuditReport {
 
 /// Walk the store and judge it. Runs on every boot BEFORE any traffic.
 ///
-/// The walk is one scan per prefix; the per-sequence check recomputes
-/// the expected keys and values from the sequence alone and compares
-/// byte for byte, so a value that carries the right tag but the wrong
-/// body counts as partial. A key that parses to no sequence (foreign,
-/// or from another bench build) is counted as seen-but-unjudged rather
-/// than partial: the audit judges bench batches, and refuses to call
-/// something it did not write a failure of the seal.
+/// The walk over the empty prefix is what the protocol literally
+/// says: no key under the reserved `0x00` namespace visible to the
+/// audit. The slots are then judged by direct reads: each occupied
+/// slot must hold ONE sequence's three exact values - the sequence
+/// claimed by the newest tag any of its keys carries, and that
+/// sequence must map to this slot. A missing key, a mixed or foreign
+/// tag, or a wrong body all make the slot partial: under the seal a
+/// slot is wholly on its old sequence or wholly on its new one, and
+/// anything else is the torn state the bench exists to detect.
 pub fn audit<S: MultiwriteNorFlash, const W: usize>(
     store: &FlashStorage<S, W>,
 ) -> Result<AuditReport, ArxiaError> {
-    let mut seqs: Vec<u32> = Vec::new();
     let mut reserved_visible = 0usize;
-    for prefix in [CHAIN_PREFIX, INDEX_PREFIX] {
-        store.scan_prefix(prefix, &mut |k, v| {
-            if k.first() == Some(&0x00) {
-                reserved_visible += 1;
-                return true;
-            }
-            if let Some(seq) = tag_of(v) {
-                if !seqs.contains(&seq) {
-                    seqs.push(seq);
-                }
-            }
-            true
-        })?;
-    }
-    // A reserved key can never match a bench prefix, but the walk over
-    // the empty prefix is what the protocol literally says: no key
-    // under 0x00 visible to the audit walk.
     store.scan_prefix(b"", &mut |k, _| {
         if k.first() == Some(&0x00) {
             reserved_visible += 1;
@@ -264,36 +279,49 @@ pub fn audit<S: MultiwriteNorFlash, const W: usize>(
         true
     })?;
 
+    let mut slots_occupied = 0usize;
     let mut complete = 0usize;
     let mut partial: Vec<u32> = Vec::new();
     let mut highest_complete: Option<u32> = None;
-    for &seq in &seqs {
-        let expected = BenchBatch::new(seq);
-        let mut present = 0u8;
-        for (key, value) in expected.keys.iter().zip(expected.values.iter()) {
-            match store.get(key)? {
-                Some(got) if got == *value => present += 1,
-                Some(_) => {
-                    // A key that exists with other bytes: it belongs
-                    // to this sequence by tag but not by body - partial
-                    // by the strictest reading, which is the one the
-                    // seal must satisfy.
-                }
-                None => {}
-            }
+    for slot in 0..SLOTS {
+        let keys = [chain_key(slot, 0), chain_key(slot, 1), index_key(slot)];
+        let values = [
+            store.get(&keys[0])?,
+            store.get(&keys[1])?,
+            store.get(&keys[2])?,
+        ];
+        if values.iter().all(|v| v.is_none()) {
+            continue;
         }
-        if present == 3 {
+        slots_occupied += 1;
+        // The sequence this slot claims: the newest tag on any of its
+        // keys - under a torn overwrite, the batch being judged.
+        let claimed = values.iter().flatten().filter_map(|v| tag_of(v)).max();
+        let coherent = match claimed {
+            Some(seq) if slot_of(seq) == slot => {
+                let expected = BenchBatch::new(seq);
+                values
+                    .iter()
+                    .zip(expected.values.iter())
+                    .all(|(got, want)| got.as_deref() == Some(want.as_slice()))
+            }
+            // A tag that does not belong to this slot never came from
+            // the bench's write path: corruption, judged partial.
+            _ => false,
+        };
+        if coherent {
             complete += 1;
+            let seq = claimed.expect("coherent implies a claimed sequence");
             highest_complete = Some(highest_complete.map_or(seq, |h| h.max(seq)));
-        } else if present > 0 {
-            partial.push(seq);
+        } else {
+            partial.push(slot);
         }
     }
 
     let persisted_high_water = store.get(HIGH_WATER_KEY)?.and_then(|v| tag_of(&v));
 
     Ok(AuditReport {
-        sequences_seen: seqs.len(),
+        slots_occupied,
         complete,
         partial,
         reserved_visible,
@@ -306,8 +334,8 @@ pub fn audit<S: MultiwriteNorFlash, const W: usize>(
 pub fn report_audit<O: Write>(out: &mut O, report: &AuditReport) -> core::fmt::Result {
     write!(
         out,
-        "AUDIT seen={} complete={} partial={} reserved_visible={} highest={} persisted={} verdict=",
-        report.sequences_seen,
+        "AUDIT slots={} complete={} partial={} reserved_visible={} highest={} persisted={} verdict=",
+        report.slots_occupied,
         report.complete,
         report.partial.len(),
         report.reserved_visible,
@@ -316,7 +344,7 @@ pub fn report_audit<O: Write>(out: &mut O, report: &AuditReport) -> core::fmt::R
     )?;
     match report.verdict() {
         Verdict::Pass => writeln!(out, "PASS"),
-        Verdict::PartialBatch => writeln!(out, "FAIL:partial_batch seqs={:?}", report.partial),
+        Verdict::PartialBatch => writeln!(out, "FAIL:partial_batch slots={:?}", report.partial),
         Verdict::ReservedVisible => writeln!(out, "FAIL:reserved_visible"),
         Verdict::CommittedBatchLost => writeln!(out, "FAIL:committed_batch_lost"),
     }

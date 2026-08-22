@@ -23,7 +23,15 @@ flash backend what kill-nine is to the redb backend, one layer lower.
   (two 193-byte blocks under chain keys plus an index entry — the
   same shape as the conformance fixture), each batch tagged with a
   monotonically increasing sequence number **that the firmware
-  itself embeds inside every value it writes**. The store provides
+  itself embeds inside every value it writes**. Batch keys rotate
+  over a bounded window of slots (`slot = seq % SLOTS`) while the
+  tags keep increasing: per-sequence keys would fill the region in
+  minutes and then stop exercising anything, while a bounded live
+  set keeps the log wrapping and reclaiming indefinitely — the wear
+  traffic the endurance model prices. A slot overwrite is one
+  batch, so the seal makes it atomic: after any cut a slot is
+  wholly on its old sequence or wholly on its new one, and a mixed
+  slot is precisely the partial-batch failure below. The store provides
   no sequence facility — its commit marker carries only an
   operation count and is gone once a batch lands — so every
   sequence number this protocol mentions, including the audit
