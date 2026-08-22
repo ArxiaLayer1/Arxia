@@ -48,3 +48,24 @@ jobs:
           # Full ESP32 QEMU integration requires espflash + qemu-system-xtensa.
           # TODO(M6-M12): Add espflash + QEMU runner for on-target testing.
           cargo test -p arxia-core -p arxia-crypto -p arxia-lattice
+
+  esp32-bench-firmware:
+    name: Bench firmware (xtensa-esp32-none-elf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "targets/esp32-bench -> target"
+      - name: Install the Xtensa toolchain
+        run: |
+          curl -L https://github.com/esp-rs/espup/releases/download/v0.17.1/espup-x86_64-unknown-linux-gnu -o espup
+          chmod a+x espup
+          ./espup install --targets esp32
+      - name: Build the bench firmware
+        working-directory: targets/esp32-bench
+        run: |
+          source ~/export-esp.sh
+          cargo build --release
+          cargo fmt --all -- --check
+          cargo clippy --release -- -D warnings
